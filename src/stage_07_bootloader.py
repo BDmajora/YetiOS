@@ -1,25 +1,13 @@
 """Stage 7 — libreldr bootloader installation (UEFI only).
 
-Lays the bootloader onto the ESP. There are two locations:
-
-  1. `\\EFI\\BOOT\\BOOTX64.EFI` — the UEFI "removable media" fallback path.
-     Every UEFI firmware will try this when no NVRAM entry matches, which
-     is exactly the situation in a freshly-defined VM: the VM's NVRAM is
-     blank, so falling back to this path is what lets the very first boot
-     succeed without any host-side efibootmgr trickery.
-
-  2. `\\EFI\\libreldr\\libreldr.efi` — the canonical install location. The
-     `libreldr-register` OpenRC service (installed in stage 6) runs once
-     inside the guest on first boot and points an NVRAM entry called
-     "LibreLoader (YetiOS)" at this path. After that, libreldr appears in
-     the firmware boot menu next to any other installed OS.
-
-Boot entries and the config renderer come from libreldr itself
-(libreldr_entries.py inside the cloned repo).
+Always wipes the cached libreldr clone and rebuilds from scratch so that
+upstream changes to libreldr never get masked by a stale binary. Then
+verifies that the .efi placed on the ESP is the freshly built one.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import shutil
 import sys
@@ -40,22 +28,38 @@ LIBRELDR_REPO   = "https://github.com/BDmajora/libreldr.git"
 LIBRELDR_BRANCH = "main"
 
 
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _ensure_libreldr(cfg: Config) -> Path:
-    """Clone libreldr if missing, build libreldr.efi, return the repo dir."""
+    """Wipe any cached clone, re-clone, build, return the repo dir.
+
+    Why wipe every time: the previous behavior of `git pull --ff-only`
+    on a cached clone could silently skip rebuilds when permissions or
+    object cache got into a bad state, leaving a stale libreldr.efi.
+    Building from scratch is cheap (~2s) and guarantees correctness.
+    """
     src_dir  = cfg.build_dir / "libreldr"
     efi_path = src_dir / "libreldr.efi"
 
-    if not src_dir.is_dir():
-        info(f"Cloning libreldr from {LIBRELDR_REPO} ...")
-        run(["git", "clone", "--depth", "1", "-b", LIBRELDR_BRANCH,
-             LIBRELDR_REPO, str(src_dir)])
-    else:
-        info("libreldr clone present; pulling latest ...")
-        run(["git", "-C", str(src_dir), "pull", "--ff-only"], check=False)
+    if src_dir.exists():
+        info(f"Removing cached libreldr clone at {src_dir} ...")
+        shutil.rmtree(src_dir)
+        if src_dir.exists():
+            err(f"Failed to remove {src_dir}. Check permissions.")
+            sys.exit(1)
 
-    if not efi_path.is_file():
-        info("Building libreldr.efi ...")
-        run(["make", "-C", str(src_dir)])
+    info(f"Cloning libreldr from {LIBRELDR_REPO} ...")
+    run(["git", "clone", "--depth", "1", "-b", LIBRELDR_BRANCH,
+         LIBRELDR_REPO, str(src_dir)])
+
+    info("Building libreldr.efi ...")
+    run(["make", "-C", str(src_dir)])
 
     if not efi_path.is_file():
         err(f"Build finished but {efi_path} was not produced.")
@@ -103,6 +107,21 @@ def _resolve_kernel_paths(cfg: Config) -> tuple[Path, Path | None]:
     return kernel, initrd
 
 
+def _verify_esp_matches_build(src_efi: Path, esp_paths: list[Path]) -> None:
+    """Hard-fail if the .efi on the ESP doesn't match the freshly built one."""
+    src_hash = _sha256(src_efi)
+    info(f"freshly built libreldr.efi sha256: {src_hash[:16]}...")
+    for p in esp_paths:
+        if not p.is_file():
+            err(f"Expected file missing on ESP: {p}")
+            sys.exit(1)
+        if _sha256(p) != src_hash:
+            err(f"ESP copy {p} does not match freshly built binary!")
+            err("Something corrupted the copy between build and install.")
+            sys.exit(1)
+    ok("ESP copies verified against freshly built binary")
+
+
 def run_stage(cfg: Config, loop: str) -> None:
     step_banner("Stage 7 — Install libreldr (UEFI)")
 
@@ -111,36 +130,35 @@ def run_stage(cfg: Config, loop: str) -> None:
 
     libreldr_dir = _ensure_libreldr(cfg)
     libreldr_entries = _load_libreldr_entries(libreldr_dir)
+    src_efi = libreldr_dir / "libreldr.efi"
 
-    # Canonical kernel/initramfs names on the ESP. We copy under \EFI\yetios\
-    # so the config in libreldr.conf can point at stable, predictable paths
-    # regardless of which kernel version Gentoo installed.
+    # Canonical kernel/initramfs names on the ESP.
     info("Installing kernel and initramfs to ESP...")
     efi_dir = boot / "EFI"
     (efi_dir / "BOOT").mkdir(parents=True, exist_ok=True)
     (efi_dir / "libreldr").mkdir(parents=True, exist_ok=True)
     (efi_dir / "yetios").mkdir(parents=True, exist_ok=True)
 
-    # The Linux EFI stub means vmlinuz is itself a PE/COFF EFI app, and
-    # libreldr loads it via BS->LoadImage / StartImage. No separate stub
-    # or shim needed.
     shutil.copy2(kernel, efi_dir / "yetios" / "vmlinuz.efi")
     if initrd:
         shutil.copy2(initrd, efi_dir / "yetios" / "initramfs.img")
 
-    # libreldr.efi in two places:
-    #   1. \EFI\BOOT\BOOTX64.EFI — fallback / removable-media path; lets the
-    #      VM boot on first power-on before NVRAM has an entry.
-    #   2. \EFI\libreldr\libreldr.efi — canonical path; the first-boot
-    #      service registers this with efibootmgr as "LibreLoader (YetiOS)".
+    # Two copies of libreldr.efi (fallback + canonical paths).
     info("Installing libreldr.efi to fallback and canonical paths...")
-    shutil.copy2(libreldr_dir / "libreldr.efi",
-                 efi_dir / "BOOT" / "BOOTX64.EFI")
-    shutil.copy2(libreldr_dir / "libreldr.efi",
-                 efi_dir / "libreldr" / "libreldr.efi")
+    bootx64 = efi_dir / "BOOT" / "BOOTX64.EFI"
+    canonical = efi_dir / "libreldr" / "libreldr.efi"
 
-    # libreldr config
+    # Remove first so we can't accidentally end up reading a stale copy
+    # from any kind of caching layer.
+    for p in (bootx64, canonical):
+        if p.exists():
+            p.unlink()
+
+    shutil.copy2(src_efi, bootx64)
+    shutil.copy2(src_efi, canonical)
+
     (efi_dir / "libreldr" / "libreldr.conf").write_text(
         libreldr_entries.render_libreldr_conf())
 
+    _verify_esp_matches_build(src_efi, [bootx64, canonical])
     ok("libreldr installed (UEFI fallback path + canonical path)")
