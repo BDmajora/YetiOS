@@ -21,6 +21,7 @@ env-update
 
 echo "[yeti] installing sudo"
 emerge --noreplace app-admin/sudo
+mkdir -p /etc/sudoers.d
 echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
 chmod 440 /etc/sudoers.d/wheel
 

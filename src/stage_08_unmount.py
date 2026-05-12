@@ -1,4 +1,4 @@
-""""Stage 8 — clean unmount, detach loop device, print boot instructions."""
+"""Stage 8 — clean unmount, detach loop device, print boot instructions."""
 
 from __future__ import annotations
 import os
@@ -8,8 +8,6 @@ from .common import Config, losetup_detach, ok, warn, run, step_banner
 
 
 def _verify_image(cfg: Config) -> None:
-    """Basic sanity checks on the finished image before declaring success."""
-    # Check image exists and is non-trivially sized (>= 1 GB)
     if not cfg.img_path.exists():
         warn("Image file not found!")
         return
@@ -18,12 +16,11 @@ def _verify_image(cfg: Config) -> None:
         warn(f"Image looks too small ({size // (1024**2)} MB) — build may be incomplete.")
         return
 
-    # Check partitions are visible
     result = subprocess.run(
         ["parted", "-s", str(cfg.img_path), "print"],
         capture_output=True, text=True
     )
-    if "yetios-boot" not in result.stdout and "yetios-root" not in result.stdout:
+    if "ROOT" not in result.stdout and "ESP" not in result.stdout:
         warn("Expected partition labels not found — image may not be bootable.")
         return
 
@@ -45,8 +42,14 @@ def run_stage(cfg: Config, loop: "str | None") -> None:
 
     ok(f"YetiOS image: {cfg.img_path}")
     print()
-    print("Boot it:")
+    print("Boot it (BIOS, QEMU default SeaBIOS):")
     print(f"  qemu-system-x86_64 -enable-kvm -m 4G \\")
+    print(f"      -drive file={cfg.img_path},format=raw \\")
+    print(f"      -vga virtio -display gtk,gl=on")
+    print()
+    print("Boot it (UEFI, OVMF):")
+    print(f"  qemu-system-x86_64 -enable-kvm -m 4G \\")
+    print(f"      -bios /usr/share/OVMF/OVMF_CODE.fd \\")
     print(f"      -drive file={cfg.img_path},format=raw \\")
     print(f"      -vga virtio -display gtk,gl=on")
     print()
