@@ -3,9 +3,25 @@
   <memory unit="KiB">4194304</memory>
   <currentMemory unit="KiB">4194304</currentMemory>
   <vcpu placement="static">2</vcpu>
-  <os>
+  <os firmware="efi">
     <type arch="x86_64" machine="pc-q35-10.0">hvm</type>
-    <boot dev="hd"/>
+    <firmware>
+      <feature enabled="no" name="enrolled-keys"/>
+      <feature enabled="no" name="secure-boot"/>
+    </firmware>
+    <loader readonly="yes" secure="no" type="pflash"/>
+    <nvram/>
+    <!--
+      NOTE: do NOT add <boot dev='hd'/> here.
+
+      OVMF ignores that legacy hint and only enumerates disks that have a
+      per-device <boot order='N'/> attribute. Without per-device boot order,
+      OVMF will list the disk as "UEFI Misc Device" (raw PCI path, no HD()
+      component) and refuse to scan its GPT or look for \EFI\BOOT\BOOTX64.EFI.
+
+      The per-device <boot order='1'/> on the <disk> below is the supported
+      way to tell OVMF that this is a bootable device.
+    -->
   </os>
   <features>
     <acpi/>
@@ -31,6 +47,7 @@
       <driver name="qemu" type="raw"/>
       <source file="__IMG_PATH__"/>
       <target dev="vda" bus="virtio"/>
+      <boot order="1"/>
     </disk>
     <controller type="usb" index="0" model="qemu-xhci" ports="15"/>
     <controller type="virtio-serial" index="0"/>

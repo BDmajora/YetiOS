@@ -14,7 +14,7 @@ from .common import (
     step_banner,
     warn,
 )
-from .templates import YETI_PACKAGE_LIST
+from .templates import LIBRELDR_REGISTER_SERVICE, YETI_PACKAGE_LIST
 
 
 def run_stage(cfg: Config) -> None:
@@ -69,8 +69,18 @@ def run_stage(cfg: Config) -> None:
         info("Running post-install configuration...")
         in_chroot(cfg, postbuild)
 
-        # 8. Verify user was actually created
-        result = in_chroot(cfg, f"id {cfg.yeti_user}", check=False) if hasattr(in_chroot, '__code__') else None
+        # 8. Install the first-boot UEFI registration service.
+        # This runs once inside the guest (where efivarfs is the *guest's*
+        # NVRAM) to register libreldr.efi as a named boot entry.
+        info("Installing libreldr-register first-boot service...")
+        svc_path = cfg.mount / "etc/init.d/libreldr-register"
+        svc_path.parent.mkdir(parents=True, exist_ok=True)
+        svc_path.write_text(LIBRELDR_REGISTER_SERVICE)
+        svc_path.chmod(0o755)
+        in_chroot(cfg, "rc-update add libreldr-register default")
+        ok("libreldr-register service installed and enabled")
+
+        # 9. Verify user was actually created
         check = (cfg.mount / "etc" / "passwd")
         if cfg.yeti_user not in check.read_text():
             err(f"User '{cfg.yeti_user}' was NOT found in /etc/passwd after postbuild!")

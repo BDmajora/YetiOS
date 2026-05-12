@@ -1,12 +1,11 @@
 """Stages 2 — disk image creation, partitioning, formatting, mounting.
 
-GPT layout supporting both BIOS and UEFI boot:
-  p1   1 MiB     BIOS Boot Partition  (syslinux core; no filesystem)
-  p2   512 MiB   ESP (FAT32)          (libreldr.efi + kernel for both paths)
-  p3   rest      ext4                 (yetios-root)
+UEFI-only GPT layout:
+  p1   512 MiB   ESP (FAT32)          (libreldr.efi + kernel/initramfs)
+  p2   rest      ext4                 (yetios-root)
 
-The ESP doubles as /boot for the BIOS kernel/initrd, so one partition
-serves both firmwares.
+The ESP is mounted at /boot inside the guest so kernel/initramfs files
+produced by `installkernel` land where libreldr expects them.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ from .common import (
 
 
 def run_create(cfg: Config) -> None:
-    step_banner("Stage 2 — Create disk image (GPT, hybrid BIOS+UEFI)")
+    step_banner("Stage 2 — Create disk image (GPT, UEFI-only)")
     cfg.build_dir.mkdir(parents=True, exist_ok=True)
 
     if cfg.img_path.exists():
@@ -38,11 +37,9 @@ def run_create(cfg: Config) -> None:
     run([
         "parted", "-s", str(cfg.img_path),
         "mklabel", "gpt",
-        "mkpart", "BIOS-BOOT", "1MiB", "2MiB",
-        "set", "1", "bios_grub", "on",
-        "mkpart", "ESP", "fat32", "2MiB", "514MiB",
-        "set", "2", "esp", "on",
-        "mkpart", "ROOT", "ext4", "514MiB", "100%",
+        "mkpart", "ESP", "fat32", "1MiB", "513MiB",
+        "set", "1", "esp", "on",
+        "mkpart", "ROOT", "ext4", "513MiB", "100%",
     ])
 
     ok("partition table written")
@@ -54,8 +51,8 @@ def run_mount(cfg: Config) -> str:
     loop = loop_for(cfg.img_path) or losetup_attach(cfg.img_path)
     info(f"loop device: {loop}")
 
-    esp_part  = f"{loop}p2"
-    root_part = f"{loop}p3"
+    esp_part  = f"{loop}p1"
+    root_part = f"{loop}p2"
 
     def has_fs(part: str) -> bool:
         cp = run(["blkid", "-o", "value", "-s", "TYPE", part],
@@ -71,7 +68,7 @@ def run_mount(cfg: Config) -> str:
     if not os.path.ismount(cfg.mount):
         run(["mount", root_part, str(cfg.mount)])
 
-    # ESP mounted at /boot — same FAT partition serves BIOS and UEFI.
+    # ESP mounted at /boot — UEFI firmware looks for \EFI\BOOT\BOOTX64.EFI here.
     (cfg.mount / "boot").mkdir(parents=True, exist_ok=True)
     if not os.path.ismount(cfg.mount / "boot"):
         run(["mount", esp_part, str(cfg.mount / "boot")])

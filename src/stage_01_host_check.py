@@ -15,8 +15,8 @@ REQUIRED_HOST_TOOLS = [
     "losetup", "mount", "umount",
     # Download + extract stage3
     "wget", "tar", "xz",
-    # Chroot + bootloader install
-    "chroot", "syslinux",
+    # Chroot
+    "chroot",
     # Fetch + build libreldr from its own repo
     "git", "make",
 ]
@@ -37,7 +37,7 @@ def run_stage(cfg: Config) -> None:
     if missing:
         err("Missing host tools: " + ", ".join(missing))
         err("On Debian/Ubuntu/Mint:")
-        err("  apt install parted util-linux syslinux dosfstools qemu-utils \\")
+        err("  apt install parted util-linux dosfstools qemu-utils \\")
         err("              wget tar xz-utils git build-essential gnu-efi")
         sys.exit(1)
 

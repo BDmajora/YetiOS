@@ -1,12 +1,21 @@
-"""Stage 7 — libreldr bootloader installation (BIOS + UEFI).
+"""Stage 7 — libreldr bootloader installation (UEFI only).
 
-Installs both backends so the same image boots on legacy BIOS and on
-modern UEFI firmware. User sees the same libreldr menu either way.
+Lays the bootloader onto the ESP. There are two locations:
 
-Boot entries and the two config renderers come from libreldr itself
-(libreldr_entries.py inside the cloned repo). This Stage knows nothing
-about menu wording or kernel cmdlines — it just runs the renderers
-shipped alongside libreldr.efi.
+  1. `\\EFI\\BOOT\\BOOTX64.EFI` — the UEFI "removable media" fallback path.
+     Every UEFI firmware will try this when no NVRAM entry matches, which
+     is exactly the situation in a freshly-defined VM: the VM's NVRAM is
+     blank, so falling back to this path is what lets the very first boot
+     succeed without any host-side efibootmgr trickery.
+
+  2. `\\EFI\\libreldr\\libreldr.efi` — the canonical install location. The
+     `libreldr-register` OpenRC service (installed in stage 6) runs once
+     inside the guest on first boot and points an NVRAM entry called
+     "LibreLoader (YetiOS)" at this path. After that, libreldr appears in
+     the firmware boot menu next to any other installed OS.
+
+Boot entries and the config renderer come from libreldr itself
+(libreldr_entries.py inside the cloned repo).
 """
 
 from __future__ import annotations
@@ -29,12 +38,6 @@ from .common import (
 
 LIBRELDR_REPO   = "https://github.com/BDmajora/libreldr.git"
 LIBRELDR_BRANCH = "main"
-
-SYSLINUX_C32_DIRS = [
-    "usr/share/syslinux",
-    "usr/lib/syslinux/bios",
-]
-REQUIRED_C32 = ["menu.c32", "libcom32.c32", "libutil.c32", "ldlinux.c32"]
 
 
 def _ensure_libreldr(cfg: Config) -> Path:
@@ -80,21 +83,10 @@ def _load_libreldr_entries(repo_dir: Path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    for fn in ("render_libreldr_conf", "render_syslinux_cfg"):
-        if not hasattr(mod, fn):
-            err(f"{entries_path} is missing {fn}()")
-            sys.exit(1)
+    if not hasattr(mod, "render_libreldr_conf"):
+        err(f"{entries_path} is missing render_libreldr_conf()")
+        sys.exit(1)
     return mod
-
-
-def _find_syslinux_dir(cfg: Config) -> Path:
-    for d in SYSLINUX_C32_DIRS:
-        p = cfg.mount / d
-        if (p / "menu.c32").is_file():
-            return p
-    err("Syslinux modules not found in target.")
-    err("Stage 6 should have installed sys-boot/syslinux.")
-    sys.exit(1)
 
 
 def _resolve_kernel_paths(cfg: Config) -> tuple[Path, Path | None]:
@@ -112,7 +104,7 @@ def _resolve_kernel_paths(cfg: Config) -> tuple[Path, Path | None]:
 
 
 def run_stage(cfg: Config, loop: str) -> None:
-    step_banner("Stage 7 — Install libreldr (BIOS + UEFI)")
+    step_banner("Stage 7 — Install libreldr (UEFI)")
 
     boot = cfg.mount / "boot"
     kernel, initrd = _resolve_kernel_paths(cfg)
@@ -120,65 +112,35 @@ def run_stage(cfg: Config, loop: str) -> None:
     libreldr_dir = _ensure_libreldr(cfg)
     libreldr_entries = _load_libreldr_entries(libreldr_dir)
 
-    # 1. Canonical kernel/initrd names (both backends use these).
-    info("Installing kernel and initramfs to /boot...")
-    shutil.copy2(kernel, boot / "vmlinuz")
-    if initrd:
-        shutil.copy2(initrd, boot / "initramfs.img")
-
-    # 2. UEFI backend.
-    info("Installing UEFI backend (libreldr.efi)...")
+    # Canonical kernel/initramfs names on the ESP. We copy under \EFI\yetios\
+    # so the config in libreldr.conf can point at stable, predictable paths
+    # regardless of which kernel version Gentoo installed.
+    info("Installing kernel and initramfs to ESP...")
     efi_dir = boot / "EFI"
     (efi_dir / "BOOT").mkdir(parents=True, exist_ok=True)
     (efi_dir / "libreldr").mkdir(parents=True, exist_ok=True)
     (efi_dir / "yetios").mkdir(parents=True, exist_ok=True)
 
+    # The Linux EFI stub means vmlinuz is itself a PE/COFF EFI app, and
+    # libreldr loads it via BS->LoadImage / StartImage. No separate stub
+    # or shim needed.
+    shutil.copy2(kernel, efi_dir / "yetios" / "vmlinuz.efi")
+    if initrd:
+        shutil.copy2(initrd, efi_dir / "yetios" / "initramfs.img")
+
+    # libreldr.efi in two places:
+    #   1. \EFI\BOOT\BOOTX64.EFI — fallback / removable-media path; lets the
+    #      VM boot on first power-on before NVRAM has an entry.
+    #   2. \EFI\libreldr\libreldr.efi — canonical path; the first-boot
+    #      service registers this with efibootmgr as "LibreLoader (YetiOS)".
+    info("Installing libreldr.efi to fallback and canonical paths...")
     shutil.copy2(libreldr_dir / "libreldr.efi",
                  efi_dir / "BOOT" / "BOOTX64.EFI")
+    shutil.copy2(libreldr_dir / "libreldr.efi",
+                 efi_dir / "libreldr" / "libreldr.efi")
+
+    # libreldr config
     (efi_dir / "libreldr" / "libreldr.conf").write_text(
         libreldr_entries.render_libreldr_conf())
 
-    # Linux EFI stub: vmlinuz is itself a PE/COFF EFI app.
-    shutil.copy2(boot / "vmlinuz", efi_dir / "yetios" / "vmlinuz.efi")
-    if initrd:
-        shutil.copy2(boot / "initramfs.img",
-                     efi_dir / "yetios" / "initramfs.img")
-
-    ok("UEFI backend installed")
-
-    # 3. BIOS backend.
-    info("Installing BIOS backend (syslinux, libreldr-themed)...")
-    sys_dir = _find_syslinux_dir(cfg)
-    for c32 in REQUIRED_C32:
-        src = sys_dir / c32
-        if not src.is_file():
-            err(f"Missing syslinux module: {src}")
-            sys.exit(1)
-        shutil.copy2(src, boot / c32)
-
-    (boot / "syslinux.cfg").write_text(
-        libreldr_entries.render_syslinux_cfg())
-
-    # syslinux --install writes ldlinux.sys onto the FAT ESP partition.
-    esp_part = f"{loop}p2"
-    run(["syslinux", "--install", esp_part])
-
-    # MBR boot stub — prefer gptmbr.bin for GPT layouts.
-    mbr_candidates = [
-        cfg.mount / "usr/share/syslinux/gptmbr.bin",
-        cfg.mount / "usr/share/syslinux/mbr.bin",
-        cfg.mount / "usr/lib/syslinux/bios/gptmbr.bin",
-        cfg.mount / "usr/lib/syslinux/bios/mbr.bin",
-    ]
-    mbr = next((p for p in mbr_candidates if p.is_file()), None)
-    if mbr is None:
-        err("No syslinux MBR stub (mbr.bin / gptmbr.bin) found in target.")
-        sys.exit(1)
-    info(f"Writing MBR stub: {mbr}")
-    run(f"dd if={mbr} of={loop} bs=440 count=1 conv=notrunc")
-
-    # Tell the MBR which GPT partition to chain to.
-    run(["parted", "-s", loop, "set", "2", "legacy_boot", "on"])
-
-    ok("BIOS backend installed")
-    ok("libreldr installed for both BIOS and UEFI")
+    ok("libreldr installed (UEFI fallback path + canonical path)")
