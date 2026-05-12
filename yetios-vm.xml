@@ -1,0 +1,69 @@
+<domain type="kvm">
+  <name>yetios</name>
+  <memory unit="KiB">4194304</memory>
+  <currentMemory unit="KiB">4194304</currentMemory>
+  <vcpu placement="static">2</vcpu>
+  <os>
+    <type arch="x86_64" machine="pc-q35-10.0">hvm</type>
+    <boot dev="hd"/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <vmport state="off"/>
+  </features>
+  <cpu mode="host-passthrough" check="none" migratable="on"/>
+  <clock offset="utc">
+    <timer name="rtc" tickpolicy="catchup"/>
+    <timer name="pit" tickpolicy="delay"/>
+    <timer name="hpet" present="no"/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <pm>
+    <suspend-to-mem enabled="no"/>
+    <suspend-to-disk enabled="no"/>
+  </pm>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="raw"/>
+      <source file="__IMG_PATH__"/>
+      <target dev="vda" bus="virtio"/>
+    </disk>
+    <controller type="usb" index="0" model="qemu-xhci" ports="15"/>
+    <controller type="virtio-serial" index="0"/>
+    <interface type="network">
+      <source network="default"/>
+      <model type="virtio"/>
+    </interface>
+    <serial type="pty">
+      <target type="isa-serial" port="0">
+        <model name="isa-serial"/>
+      </target>
+    </serial>
+    <console type="pty">
+      <target type="serial" port="0"/>
+    </console>
+    <channel type="spicevmc">
+      <target type="virtio" name="com.redhat.spice.0"/>
+    </channel>
+    <input type="tablet" bus="usb"/>
+    <input type="mouse" bus="ps2"/>
+    <input type="keyboard" bus="ps2"/>
+    <graphics type="spice" autoport="yes">
+      <listen type="address"/>
+      <image compression="off"/>
+    </graphics>
+    <sound model="ich9"/>
+    <audio id="1" type="spice"/>
+    <video>
+      <model type="virtio" heads="1" primary="yes"/>
+    </video>
+    <memballoon model="virtio"/>
+    <rng model="virtio">
+      <backend model="random">/dev/urandom</backend>
+    </rng>
+  </devices>
+</domain>
