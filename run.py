@@ -16,8 +16,9 @@ Pipeline:
   4. extract            — Extract tarball into the mounted image
   5. portage_setup      — make.conf + binhost + sync portage tree
   6. install_packages   — emerge runtime packages (mostly binpkgs, ~30 min)
-  7. bootloader         — extlinux + MBR + kernel symlinks
-  8. unmount            — Clean detach, print QEMU boot command
+  7. bootloader         — libreldr UEFI install + kernel/initramfs to ESP
+  8. splash             — Build and install SnowCone boot splash
+  9. unmount            — Clean detach, print QEMU boot command
 
 Usage:
   sudo ./run.py                            # full build, defaults to nproc
@@ -41,7 +42,8 @@ from src import (
     stage_05_portage_setup,
     stage_06_install_packages,
     stage_07_bootloader,
-    stage_08_unmount,
+    stage_08_splash,
+    stage_09_unmount,
 )
 from src.common import (
     BuildState,
@@ -141,9 +143,13 @@ def main() -> int:
             stage_07_bootloader.run_stage(cfg, loop)
             state.mark("07_bootloader")
 
-        if should_run("08_unmount"):
-            stage_08_unmount.run_stage(cfg, loop)
-            state.mark("08_unmount")
+        if should_run("08_splash"):
+            stage_08_splash.run_stage(cfg)
+            state.mark("08_splash")
+
+        if should_run("09_unmount"):
+            stage_09_unmount.run_stage(cfg, loop)
+            state.mark("09_unmount")
 
     except subprocess.CalledProcessError as e:
         err(f"Command failed: {e}")
