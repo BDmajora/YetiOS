@@ -50,6 +50,12 @@ sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64/
 
 # ---------------------------------------------------------------------------
 # YetiOS Base Package List (UEFI-only — no syslinux)
+#
+# Note on snowfall runtime deps: snowfall links against libdrm, libinput,
+# cairo, libpam (sys-libs/pam), libxkbcommon, and libudev. Most of these
+# are pulled in transitively by mesa + the Wayland stack + elogind, but
+# we list them explicitly so a future change to those packages doesn't
+# silently break the login manager at boot.
 # ---------------------------------------------------------------------------
 YETI_PACKAGE_LIST = [
     # Kernel & Hardware
@@ -70,6 +76,16 @@ YETI_PACKAGE_LIST = [
     # Wayland stack
     "dev-libs/wayland",
     "dev-libs/wayland-protocols",
+
+    # Snowfall login manager runtime deps
+    "x11-libs/cairo",
+    "dev-libs/libinput",
+    "x11-libs/libxkbcommon",
+    "sys-libs/pam",
+    # libdrm comes from x11-libs/libdrm (already a mesa dep, listed for clarity)
+    "x11-libs/libdrm",
+    # libudev comes from sys-apps/eudev (already a base dep, listed for clarity)
+    "virtual/udev",
 ]
 
 # ---------------------------------------------------------------------------

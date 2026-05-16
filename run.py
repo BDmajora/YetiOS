@@ -18,12 +18,20 @@ Pipeline:
   6. install_packages   — emerge runtime packages (mostly binpkgs, ~30 min)
   7. bootloader         — libreldr UEFI install + kernel/initramfs to ESP
   8. splash             — Build and install SnowCone boot splash
-  9. unmount            — Clean detach, print QEMU boot command
+  9. snowfall           — Build and install Snowfall login manager
+ 10. unmount            — Clean detach, print QEMU boot command
+
+Boot chain on the resulting image:
+  libreldr  -> snowcone (boot splash, grabs DRM master)
+            -> snowfall (login manager, takes DRM master,
+                        which causes snowcone to detect master loss
+                        and exit cleanly)
+            -> user's Wayland compositor
 
 Usage:
   sudo ./run.py                            # full build, defaults to nproc
   sudo ./run.py --restart                  # wipe stage markers
-  sudo ./run.py --only 06_install_packages # re-run a single stage
+  sudo ./run.py --only 09_snowfall         # re-run a single stage
 """
 
 from __future__ import annotations
@@ -43,7 +51,8 @@ from src import (
     stage_06_install_packages,
     stage_07_bootloader,
     stage_08_splash,
-    stage_09_unmount,
+    stage_09_snowfall,
+    stage_10_unmount,
 )
 from src.common import (
     BuildState,
@@ -147,9 +156,13 @@ def main() -> int:
             stage_08_splash.run_stage(cfg)
             state.mark("08_splash")
 
-        if should_run("09_unmount"):
-            stage_09_unmount.run_stage(cfg, loop)
-            state.mark("09_unmount")
+        if should_run("09_snowfall"):
+            stage_09_snowfall.run_stage(cfg)
+            state.mark("09_snowfall")
+
+        if should_run("10_unmount"):
+            stage_10_unmount.run_stage(cfg, loop)
+            state.mark("10_unmount")
 
     except subprocess.CalledProcessError as e:
         err(f"Command failed: {e}")
