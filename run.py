@@ -16,11 +16,12 @@ Pipeline:
   4. extract            — Extract tarball into the mounted image
   5. portage_setup      — make.conf + binhost + sync portage tree
   6. install_packages   — emerge runtime packages (mostly binpkgs, ~30 min)
-  7. bootloader         — libreldr UEFI install + kernel/initramfs to ESP
-  8. splash             — Build and install snowcone boot splash
-  9. snowfall           — Build and install snowfall login manager
- 10. frostedglass       — Build and install frostedglass compositor
- 11. unmount            — Clean detach, print QEMU boot command
+  7. moonshine          — Build and install Moonshine (Wine fork) on host to rootfs
+  8. bootloader         — libreldr UEFI install + kernel/initramfs to ESP
+  9. splash             — Build and install snowcone boot splash
+ 10. snowfall           — Build and install snowfall login manager
+ 11. frostedglass       — Build and install frostedglass compositor
+ 12. unmount            — Clean detach, print QEMU boot command
 
 Boot chain on the resulting image:
   libreldr  -> snowcone (boot splash, grabs DRM master)
@@ -52,6 +53,7 @@ from src import (
     stage_04_extract,
     stage_05_portage_setup,
     stage_06_install_packages,
+    stage_07_moonshine,
     stage_08_bootloader,
     stage_09_snowfall,
     stage_10_frostedglass,
@@ -151,6 +153,10 @@ def main() -> int:
         if should_run("06_install_packages"):
             stage_06_install_packages.run_stage(cfg)
             state.mark("06_install_packages")
+
+        if should_run("07_moonshine"):
+            stage_07_moonshine.run_stage(cfg)
+            state.mark("07_moonshine")
 
         if should_run("07_bootloader"):
             stage_08_bootloader.run_stage(cfg, loop)

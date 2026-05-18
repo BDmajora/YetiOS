@@ -82,6 +82,7 @@ STAGES = [
     "04_extract",
     "05_portage_setup",
     "06_install_packages",
+    "07_moonshine",
     "07_bootloader",
     "08_splash",
     "09_snowfall",

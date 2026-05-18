@@ -1,5 +1,4 @@
-"""
-src/templates.py — multi-line string templates rendered into the build.
+"""src/templates.py — multi-line string templates rendered into the build.
 """
 
 # ---------------------------------------------------------------------------
@@ -83,6 +82,8 @@ YETI_PACKAGE_LIST = [
     # Wayland stack
     "dev-libs/wayland",
     "dev-libs/wayland-protocols",
+    "gui-libs/wlroots",             # Required by frostedglass compositor
+    "x11-libs/pixman",              # Required by frostedglass compositor
 
     # Snowfall login manager runtime deps
     "x11-libs/cairo",
@@ -105,6 +106,10 @@ YETI_PACKAGE_LIST = [
     "sys-libs/libunwind",           # exception handling / stack unwinding
     "dev-libs/glib",                # GLib (used by various Wine subsystems)
     "media-libs/libglvnd",          # EGL/OpenGL dispatch
+
+    # Seat management — required by wlroots compositors (frostedglass)
+    # to acquire DRM/input device access via libseat.
+    "sys-auth/seatd",
 ]
 
 # ---------------------------------------------------------------------------

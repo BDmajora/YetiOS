@@ -19,16 +19,23 @@ locale-gen
 echo 'LANG="en_US.UTF-8"' > /etc/env.d/02locale
 env-update
 
-echo "[yeti] installing sudo"
+echo "[yeti] installing sudo and seatd"
+mkdir -p /etc/portage/package.use
+echo "sys-auth/seatd server" > /etc/portage/package.use/seatd
 emerge --noreplace app-admin/sudo
+emerge --oneshot sys-auth/seatd
 mkdir -p /etc/sudoers.d
 echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
 chmod 440 /etc/sudoers.d/wheel
 
+# Ensure the seat group exists (seatd should create it, but be safe)
+getent group seat >/dev/null 2>&1 || groupadd seat
+
 echo "[yeti] creating user $YETI_USER"
 if ! id "$YETI_USER" >/dev/null 2>&1; then
-    useradd -m -s /bin/bash -G wheel,audio,video,input "$YETI_USER"
+    useradd -m -s /bin/bash -G wheel,audio,video,input,seat "$YETI_USER"
 fi
+usermod -aG seat "$YETI_USER" 2>/dev/null || true
 echo "$YETI_USER:yeti" | chpasswd
 
 echo "[yeti] setting root password"
@@ -44,6 +51,26 @@ echo "root:root" | chpasswd
 echo "[yeti] tty1 is owned by snowfall — leaving inittab default"
 
 echo "[yeti] enabling services"
+# seatd's OpenRC service may not be installed if the binpkg lacked
+# the 'server' USE flag.  Write a minimal one ourselves if missing.
+if [ ! -f /etc/init.d/seatd ]; then
+    echo "[yeti] creating seatd OpenRC service (not shipped by binpkg)"
+    cat > /etc/init.d/seatd <<'SEATD_EOF'
+#!/sbin/openrc-run
+
+description="Seat management daemon"
+command="/usr/bin/seatd"
+command_args="-g seat"
+command_background=true
+pidfile="/run/seatd.pid"
+
+depend() {{
+    need udev
+}}
+SEATD_EOF
+    chmod 755 /etc/init.d/seatd
+fi
+rc-update add seatd boot
 rc-update add dhcpcd default
 rc-update add elogind boot
 
