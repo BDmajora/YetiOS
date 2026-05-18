@@ -17,21 +17,24 @@ Pipeline:
   5. portage_setup      — make.conf + binhost + sync portage tree
   6. install_packages   — emerge runtime packages (mostly binpkgs, ~30 min)
   7. bootloader         — libreldr UEFI install + kernel/initramfs to ESP
-  8. splash             — Build and install SnowCone boot splash
-  9. snowfall           — Build and install Snowfall login manager
- 10. unmount            — Clean detach, print QEMU boot command
+  8. splash             — Build and install snowcone boot splash
+  9. snowfall           — Build and install snowfall login manager
+ 10. frostedglass       — Build and install frostedglass compositor
+ 11. unmount            — Clean detach, print QEMU boot command
 
 Boot chain on the resulting image:
   libreldr  -> snowcone (boot splash, grabs DRM master)
             -> snowfall (login manager, takes DRM master,
                         which causes snowcone to detect master loss
                         and exit cleanly)
-            -> user's Wayland compositor
+            -> frostedglass (minimal compositor, takes DRM master
+                            from snowfall, launches Wine explorer.exe)
+            -> Wine (desktop shell — taskbar, start menu, windows)
 
 Usage:
   sudo ./run.py                            # full build, defaults to nproc
   sudo ./run.py --restart                  # wipe stage markers
-  sudo ./run.py --only 09_snowfall         # re-run a single stage
+  sudo ./run.py --only 10_frostedglass     # re-run a single stage
 """
 
 from __future__ import annotations
@@ -49,10 +52,11 @@ from src import (
     stage_04_extract,
     stage_05_portage_setup,
     stage_06_install_packages,
-    stage_07_bootloader,
-    stage_08_splash,
+    stage_08_bootloader,
     stage_09_snowfall,
-    stage_10_unmount,
+    stage_10_frostedglass,
+    stage_11_splash,
+    stage_12_unmount,
 )
 from src.common import (
     BuildState,
@@ -149,20 +153,24 @@ def main() -> int:
             state.mark("06_install_packages")
 
         if should_run("07_bootloader"):
-            stage_07_bootloader.run_stage(cfg, loop)
+            stage_08_bootloader.run_stage(cfg, loop)
             state.mark("07_bootloader")
 
         if should_run("08_splash"):
-            stage_08_splash.run_stage(cfg)
+            stage_11_splash.run_stage(cfg)
             state.mark("08_splash")
 
         if should_run("09_snowfall"):
             stage_09_snowfall.run_stage(cfg)
             state.mark("09_snowfall")
 
-        if should_run("10_unmount"):
-            stage_10_unmount.run_stage(cfg, loop)
-            state.mark("10_unmount")
+        if should_run("10_frostedglass"):
+            stage_10_frostedglass.run_stage(cfg)
+            state.mark("10_frostedglass")
+
+        if should_run("11_unmount"):
+            stage_12_unmount.run_stage(cfg, loop)
+            state.mark("11_unmount")
 
     except subprocess.CalledProcessError as e:
         err(f"Command failed: {e}")

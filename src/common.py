@@ -85,7 +85,8 @@ STAGES = [
     "07_bootloader",
     "08_splash",
     "09_snowfall",
-    "10_unmount",
+    "10_frostedglass",
+    "11_unmount",
 ]
 
 
@@ -188,7 +189,7 @@ def loop_for(img: Path) -> "str | None":
 
 
 # ---------------------------------------------------------------------------
-# Chroot helpers — used by stages 5, 6, 7, 8, 9
+# Chroot helpers — used by stages 5, 6, 7, 8, 9, 10
 # ---------------------------------------------------------------------------
 
 CHROOT_BINDS = [

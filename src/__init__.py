@@ -8,10 +8,11 @@ from . import (
     stage_04_extract,
     stage_05_portage_setup,
     stage_06_install_packages,
-    stage_07_bootloader,
-    stage_08_splash,
+    stage_08_bootloader,
     stage_09_snowfall,
-    stage_10_unmount,
+    stage_10_frostedglass,
+    stage_11_splash,
+    stage_12_unmount,
 )
 
 __all__ = [
@@ -22,8 +23,9 @@ __all__ = [
     "stage_04_extract",
     "stage_05_portage_setup",
     "stage_06_install_packages",
-    "stage_07_bootloader",
-    "stage_08_splash",
+    "stage_08_bootloader",
+    "stage_11_splash",
     "stage_09_snowfall",
-    "stage_10_unmount",
+    "stage_10_frostedglass",
+    "stage_12_unmount",
 ]

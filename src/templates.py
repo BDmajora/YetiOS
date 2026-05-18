@@ -56,6 +56,13 @@ sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64/
 # are pulled in transitively by mesa + the Wayland stack + elogind, but
 # we list them explicitly so a future change to those packages doesn't
 # silently break the login manager at boot.
+#
+# Note on Moonshine (Wine fork) runtime deps: Moonshine is compiled on
+# the build host (stage 07) and installed via DESTDIR into the rootfs.
+# It links against Wayland, Vulkan, EGL, freetype, fontconfig, gnutls,
+# dbus, ncurses, and unwind at runtime. These packages must be present
+# in the rootfs or Moonshine will fail to launch. Most are already
+# pulled by the Wayland/mesa stack, but we list the key ones explicitly.
 # ---------------------------------------------------------------------------
 YETI_PACKAGE_LIST = [
     # Kernel & Hardware
@@ -86,6 +93,18 @@ YETI_PACKAGE_LIST = [
     "x11-libs/libdrm",
     # libudev comes from sys-apps/eudev (already a base dep, listed for clarity)
     "virtual/udev",
+
+    # Moonshine (Wine fork) runtime deps — needed inside the rootfs
+    # so Moonshine binaries installed by stage 07 can actually run.
+    "media-libs/vulkan-loader",     # libvulkan.so for Vulkan rendering
+    "media-libs/freetype",          # font rendering
+    "media-libs/fontconfig",        # font configuration
+    "net-libs/gnutls",              # TLS/crypto (schannel)
+    "sys-apps/dbus",                # dynamic device support
+    "sys-libs/ncurses",             # terminal / curses support
+    "sys-libs/libunwind",           # exception handling / stack unwinding
+    "dev-libs/glib",                # GLib (used by various Wine subsystems)
+    "media-libs/libglvnd",          # EGL/OpenGL dispatch
 ]
 
 # ---------------------------------------------------------------------------
@@ -171,7 +190,7 @@ start() {
         return 0
     fi
 
-    # Single-quoted in bash, so each \\ in this Python literal becomes one
+    # Single-quoted in bash, so each \\\\ in this Python literal becomes one
     # backslash on disk and is passed verbatim to efibootmgr.
     efibootmgr --create \\
         --disk "$esp_disk" \\
