@@ -16,7 +16,7 @@ Pipeline:
   4. extract            — Extract tarball into the mounted image
   5. portage_setup      — make.conf + binhost + sync portage tree
   6. install_packages   — emerge runtime packages (mostly binpkgs, ~30 min)
-  7. moonshine          — Build and install Moonshine (Wine fork) on host to rootfs
+  7. moonshine          — Build and install Moonshine (Wine fork) in chroot
   8. bootloader         — libreldr UEFI install + kernel/initramfs to ESP
   9. splash             — Build and install snowcone boot splash
  10. snowfall           — Build and install snowfall login manager

@@ -1,20 +1,22 @@
-"""Stage 8 — snowcone boot splash installation.
+"""Stage 8 — snowcone boot splash installation (chroot build).
 
-Mirrors stage_07_bootloader.py's pattern of cloning a sister project,
-building it on the build host (not inside the chroot), copying the
-binary into the rootfs, and registering an OpenRC service.
+Clone the snowcone repo on the build host (for network access), copy the
+source tree into the chroot, build inside the chroot against the target's
+DRM headers, install the binary + OpenRC service, and register it.
+
+WHY CHROOT BUILD: snowcone links against libdrm and uses Linux DRM
+headers.  Building on the host risks linking against the wrong libdrm
+version or kernel headers.  Building inside the chroot ensures the
+binary matches the target environment exactly.
 
 The integration is consciously identical to libreldr:
   - wipe any cached clone every time, so upstream changes always land
   - build from scratch (cheap; one .c file)
   - hash-verify the binary copy lands intact
 
-We also patch the cmdline tokens recommended by snowcone_integration.py
-into the libreldr config indirectly: by ensuring the kernel options used
-by libreldr include `quiet loglevel=3 vt.global_cursor_default=0`. Since
-libreldr_entries.py is the source of truth for those, this stage emits
-a small warning if it notices the tokens are missing — it does NOT
-modify libreldr_entries.py itself (that lives in the libreldr repo).
+We also check that the cmdline tokens recommended by snowcone_integration.py
+are present in the libreldr config.  Without `quiet`, kernel messages will
+scroll over the splash.
 """
 
 from __future__ import annotations
@@ -27,7 +29,11 @@ from pathlib import Path
 
 from .common import (
     Config,
+    chroot_mount,
+    chroot_umount,
     err,
+    have,
+    in_chroot,
     info,
     ok,
     run,
@@ -48,10 +54,9 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _ensure_snowcone(cfg: Config) -> Path:
-    """Wipe cached clone, re-clone, build, return the repo dir."""
+def _clone_source(cfg: Config) -> Path:
+    """Clone snowcone source on the host (network access)."""
     src_dir = cfg.build_dir / "snowcone"
-    bin_path = src_dir / "snowcone"
 
     if src_dir.exists():
         info(f"Removing cached snowcone clone at {src_dir} ...")
@@ -60,18 +65,13 @@ def _ensure_snowcone(cfg: Config) -> Path:
             err(f"Failed to remove {src_dir}. Check permissions.")
             sys.exit(1)
 
+    if not have("git"):
+        err("git not found on build host")
+        sys.exit(1)
+
     info(f"Cloning snowcone from {SNOWCONE_REPO} ...")
     run(["git", "clone", "--depth", "1", "-b", SNOWCONE_BRANCH,
          SNOWCONE_REPO, str(src_dir)])
-
-    info("Building snowcone ...")
-    run(["make", "-C", str(src_dir)])
-
-    if not bin_path.is_file():
-        err(f"Build finished but {bin_path} was not produced.")
-        err("Check that you have a working C toolchain and Linux DRM headers:")
-        err("  apt install build-essential linux-libc-dev")
-        sys.exit(1)
 
     return src_dir
 
@@ -102,8 +102,6 @@ def _check_cmdline_tokens(cfg: Config, integration) -> None:
     libreldr_repo = cfg.build_dir / "libreldr"
     entries_path = libreldr_repo / "libreldr_entries.py"
     if not entries_path.is_file():
-        # Stage 7 hasn't run yet (or was run with a different layout).
-        # Nothing to check.
         return
 
     needed = integration.cmdline_addition().split()
@@ -118,53 +116,96 @@ def _check_cmdline_tokens(cfg: Config, integration) -> None:
              f"{entries_path} for a fully silent boot.")
 
 
-def _install_files(cfg: Config, repo_dir: Path, integration) -> None:
-    files = integration.FILES
+def _build_and_install_in_chroot(cfg: Config, host_src: Path, integration) -> None:
+    """Copy source into chroot, build there, install binary + service."""
+    chroot_src = cfg.mount / "tmp" / "snowcone"
 
-    bin_src = repo_dir / files.binary_src
-    openrc_src = repo_dir / files.openrc_src
+    # Clean any leftover from a previous attempt
+    if chroot_src.exists():
+        shutil.rmtree(chroot_src)
 
-    # Destination paths inside the target rootfs.
-    bin_dst    = cfg.mount / files.binary_dst.lstrip("/")
-    openrc_dst = cfg.mount / files.openrc_dst.lstrip("/")
+    info("Copying snowcone source into chroot ...")
+    shutil.copytree(host_src, chroot_src)
 
-    bin_dst.parent.mkdir(parents=True, exist_ok=True)
-    openrc_dst.parent.mkdir(parents=True, exist_ok=True)
+    chroot_mount(cfg)
+    try:
+        # Verify build toolchain
+        info("Checking chroot build toolchain ...")
+        for tool in ("gcc", "make"):
+            cp = in_chroot(cfg, f"command -v {tool}", check=False)
+            if cp.returncode != 0:
+                err(f"Missing build tool in chroot: {tool}")
+                err("Ensure build toolchain packages are in YETI_PACKAGE_LIST.")
+                sys.exit(1)
 
-    # Remove first so any cached/stale binary can't survive.
-    for p in (bin_dst, openrc_dst):
-        if p.exists():
-            p.unlink()
+        # Verify DRM headers exist (snowcone's only real build dep)
+        cp = in_chroot(
+            cfg,
+            "test -f /usr/include/libdrm/drm.h || "
+            "test -f /usr/include/drm/drm.h || "
+            "pkg-config --exists libdrm",
+            check=False,
+        )
+        if cp.returncode != 0:
+            warn("DRM headers not detected via standard paths in chroot.")
+            warn("Build may still succeed if headers are in a non-standard location.")
 
-    shutil.copy2(bin_src, bin_dst)
-    shutil.copy2(openrc_src, openrc_dst)
-    bin_dst.chmod(0o755)
-    openrc_dst.chmod(0o755)
+        # Build
+        info("Building snowcone inside chroot ...")
+        in_chroot(cfg, "make -C /tmp/snowcone clean 2>/dev/null; make -C /tmp/snowcone")
 
-    # Verify the in-rootfs binary matches what we just built.
-    if _sha256(bin_src) != _sha256(bin_dst):
-        err("snowcone binary in rootfs does not match freshly built copy!")
-        sys.exit(1)
-    ok("snowcone binary verified in rootfs")
+        # Verify binary was produced
+        bin_chroot = chroot_src / "snowcone"
+        if not bin_chroot.is_file():
+            err("Build completed but snowcone binary was not produced.")
+            err("Check that the chroot has a C toolchain and Linux DRM headers:")
+            err("  sys-devel/gcc, sys-devel/make, sys-kernel/linux-headers")
+            sys.exit(1)
+
+        # Install files using integration metadata
+        files = integration.FILES
+
+        # Binary
+        bin_dst = cfg.mount / files.binary_dst.lstrip("/")
+        bin_dst.parent.mkdir(parents=True, exist_ok=True)
+        if bin_dst.exists():
+            bin_dst.unlink()
+        shutil.copy2(bin_chroot, bin_dst)
+        bin_dst.chmod(0o755)
+
+        # Verify copy integrity
+        if _sha256(bin_chroot) != _sha256(bin_dst):
+            err("snowcone binary in rootfs does not match freshly built copy!")
+            sys.exit(1)
+        ok("snowcone binary built in chroot, installed and verified")
+
+        # OpenRC init script
+        openrc_src = chroot_src / files.openrc_src
+        openrc_dst = cfg.mount / files.openrc_dst.lstrip("/")
+        openrc_dst.parent.mkdir(parents=True, exist_ok=True)
+        if openrc_dst.exists():
+            openrc_dst.unlink()
+        shutil.copy2(openrc_src, openrc_dst)
+        openrc_dst.chmod(0o755)
+
+        # Register the OpenRC service
+        in_chroot(cfg, f"rc-update add snowcone {integration.RUNLEVEL}")
+        ok(f"snowcone registered in '{integration.RUNLEVEL}' runlevel")
+
+    finally:
+        chroot_umount(cfg)
+        # Clean up source from chroot /tmp
+        if chroot_src.exists():
+            shutil.rmtree(chroot_src)
 
 
 def run_stage(cfg: Config) -> None:
-    step_banner("Stage 8 — Install snowcone")
+    step_banner("Stage 8 — Install snowcone (chroot build)")
 
-    repo_dir = _ensure_snowcone(cfg)
+    repo_dir = _clone_source(cfg)
     integration = _load_integration(repo_dir)
 
-    _install_files(cfg, repo_dir, integration)
-
-    # Register the OpenRC service inside the chroot.
-    from .common import chroot_mount, chroot_umount, in_chroot
-    chroot_mount(cfg)
-    try:
-        in_chroot(cfg, f"rc-update add snowcone {integration.RUNLEVEL}")
-        ok(f"snowcone registered in '{integration.RUNLEVEL}' runlevel")
-    finally:
-        chroot_umount(cfg)
-
+    _build_and_install_in_chroot(cfg, repo_dir, integration)
     _check_cmdline_tokens(cfg, integration)
 
     ok("snowcone installed")

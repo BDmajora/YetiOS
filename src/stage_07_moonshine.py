@@ -1,21 +1,35 @@
-"""Stage 7 — Moonshine installation.
+"""Stage 7 — Moonshine installation (chroot build).
 
-Clones the Moonshine repository (Wine fork), configures it for 64-bit execution
-with Wayland support, builds it on the build host, and installs it into the 
-target rootfs via DESTDIR.
+Clones the Moonshine repository (Wine fork) on the build host (for
+network access), copies the source tree into the chroot, configures and
+builds it inside the chroot against the target's libraries, then installs
+it in-place.
+
+WHY CHROOT BUILD: Moonshine/Wine links against dozens of shared libraries
+(wayland-client, vulkan, freetype, gnutls, …). Building on the host
+produces binaries linked against the host's library versions, which may
+differ from the target rootfs.  This causes anything from subtle ABI
+mismatches to outright "symbol not found" crashes at runtime.  Building
+inside the chroot guarantees the binary matches the target, just like
+frostedglass (stage 10).
+
+The trade-off is that the chroot needs a C toolchain and dev headers
+installed — stage 06 handles this via YETI_PACKAGE_LIST.
 """
 
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 from .common import (
     Config,
+    chroot_mount,
+    chroot_umount,
     err,
     have,
+    in_chroot,
     info,
     ok,
     run,
@@ -27,31 +41,20 @@ from .common import (
 MOONSHINE_REPO   = "https://github.com/BDmajora/Moonshine.git"
 MOONSHINE_BRANCH = "stable"
 
-
-def _check_build_host() -> None:
-    """Verify the build host has the basic tools and dev files needed to compile Moonshine."""
-    missing_tools = [t for t in ("git", "make", "cc", "pkg-config") if not have(t)]
-    if missing_tools:
-        err(f"Missing build tools on host: {', '.join(missing_tools)}")
-        sys.exit(1)
-
-    # Wine 9+ / Moonshine requires xkbregistry along with wayland and xkbcommon libraries.
-    pkgs = ["wayland-client", "wayland-egl", "xkbcommon", "xkbregistry"]
-    missing_pkgs = []
-    for pkg in pkgs:
-        res = subprocess.run(["pkg-config", "--exists", pkg], capture_output=True)
-        if res.returncode != 0:
-            missing_pkgs.append(pkg)
-
-    if missing_pkgs:
-        err(f"Missing required 64-bit development files on host: {', '.join(missing_pkgs)}")
-        warn("Please install the missing development libraries on your host machine.")
-        warn("On Ubuntu/Debian, run: sudo apt install libwayland-dev libxkbcommon-dev libxkbregistry-dev")
-        sys.exit(1)
+# pkg-config modules that must exist inside the chroot before configure.
+# These are the Wayland/Vulkan deps that Moonshine needs at link time.
+CHROOT_BUILD_PKGS = [
+    "wayland-client",
+    "wayland-egl",
+    "xkbcommon",
+    "xkbregistry",
+    "freetype2",
+    "vulkan",
+]
 
 
-def _ensure_moonshine(cfg: Config) -> Path:
-    """Wipe cached clone, re-clone, configure, and build Moonshine."""
+def _clone_source(cfg: Config) -> Path:
+    """Clone Moonshine source on the host (network access)."""
     src_dir = cfg.build_dir / "moonshine"
 
     if src_dir.exists():
@@ -61,35 +64,84 @@ def _ensure_moonshine(cfg: Config) -> Path:
             err(f"Failed to remove {src_dir}. Check permissions.")
             sys.exit(1)
 
+    if not have("git"):
+        err("git not found on build host")
+        sys.exit(1)
+
     info(f"Cloning Moonshine from {MOONSHINE_REPO} ...")
     run(["git", "clone", "--depth", "1", "-b", MOONSHINE_BRANCH,
          MOONSHINE_REPO, str(src_dir)])
 
-    info("Configuring Moonshine ...")
-    run(["./configure", "--enable-win64", "--with-wayland"], cwd=str(src_dir))
-
-    # Added the -j flag here to ensure multi-threaded compilation
-    info(f"Building Moonshine using {cfg.jobs} parallel jobs ...")
-    run(["make", f"-j{cfg.jobs}", "-C", str(src_dir)])
-
     return src_dir
 
 
-def _install_moonshine(cfg: Config, repo_dir: Path) -> None:
-    """Install Moonshine into the target rootfs using DESTDIR."""
-    info("Installing Moonshine into rootfs chroot ...")
-    
-    # DESTDIR must point to the absolute path of the rootfs mount point
-    destdir = f"DESTDIR={cfg.mount.resolve()}"
-    run(["make", "-C", str(repo_dir), destdir, "install"])
+def _build_in_chroot(cfg: Config, host_src: Path) -> None:
+    """Copy source into chroot, configure + build + install there."""
+    chroot_src = cfg.mount / "tmp" / "moonshine"
+
+    # Clean any leftover from a previous attempt
+    if chroot_src.exists():
+        shutil.rmtree(chroot_src)
+
+    info("Copying Moonshine source into chroot ...")
+    shutil.copytree(host_src, chroot_src)
+
+    chroot_mount(cfg)
+    try:
+        # Verify build toolchain exists inside the chroot
+        info("Checking chroot build toolchain ...")
+        for tool in ("gcc", "make", "pkg-config"):
+            cp = in_chroot(cfg, f"command -v {tool}", check=False)
+            if cp.returncode != 0:
+                err(f"Missing build tool in chroot: {tool}")
+                err("Ensure build toolchain packages are in YETI_PACKAGE_LIST.")
+                sys.exit(1)
+
+        # Verify key dev libraries are present
+        info("Checking chroot build dependencies ...")
+        missing_pc = []
+        for pkg in CHROOT_BUILD_PKGS:
+            cp = in_chroot(cfg, f"pkg-config --exists {pkg}", check=False)
+            if cp.returncode != 0:
+                missing_pc.append(pkg)
+        if missing_pc:
+            warn(f"Missing pkg-config modules in chroot: {', '.join(missing_pc)}")
+            warn("Moonshine may configure without some optional features.")
+            warn("Add the providing packages to YETI_PACKAGE_LIST if needed.")
+
+        # Configure — enable 64-bit Wine with Wayland support
+        info("Configuring Moonshine inside chroot ...")
+        in_chroot(cfg, "cd /tmp/moonshine && ./configure --enable-win64 --with-wayland")
+
+        # Build with parallel jobs
+        info(f"Building Moonshine inside chroot using {cfg.jobs} parallel jobs ...")
+        info("(This will take a while — Wine is a large codebase)")
+        in_chroot(cfg, f"make -j{cfg.jobs} -C /tmp/moonshine")
+
+        # Install in-place (no DESTDIR needed — we're already in the target)
+        info("Installing Moonshine inside chroot ...")
+        in_chroot(cfg, "make -C /tmp/moonshine install")
+
+        # Verify the binary landed
+        cp = in_chroot(cfg, "command -v wine64 || command -v wine", check=False)
+        if cp.returncode != 0:
+            err("Moonshine installed but neither wine64 nor wine found in PATH.")
+            err("Check the Moonshine build output for errors.")
+            sys.exit(1)
+
+        ok("Moonshine built and installed inside chroot")
+
+    finally:
+        chroot_umount(cfg)
+        # Clean up source from chroot /tmp
+        if chroot_src.exists():
+            shutil.rmtree(chroot_src)
 
 
 def run_stage(cfg: Config) -> None:
-    step_banner("Stage 7 — Install Moonshine")
+    step_banner("Stage 7 — Install Moonshine (chroot build)")
 
-    _check_build_host()
-
-    repo_dir = _ensure_moonshine(cfg)
-    _install_moonshine(cfg, repo_dir)
+    repo_dir = _clone_source(cfg)
+    _build_in_chroot(cfg, repo_dir)
 
     ok("Moonshine installed successfully into rootfs")

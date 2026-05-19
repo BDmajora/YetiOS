@@ -1,23 +1,22 @@
-"""Stage 9 — snowfall login manager installation.
+"""Stage 9 — snowfall login manager installation (chroot build).
 
-Mirrors stage_08_splash.py's pattern: clone the sister project, build it
-on the build host, copy binaries and configs into the rootfs, register
-the OpenRC service.
+Clone the snowfall repo on the build host (for network access), copy the
+source tree into the chroot, build inside the chroot against the target's
+libraries, install the binary + configs, and register the OpenRC service.
 
-Snowfall differs from snowcone in two ways:
-  - it has a PAM config file in addition to the binary + openrc init
-  - it has real build dependencies (libdrm, libinput, cairo, libpam,
-    libxkbcommon, libudev) that must be present on the BUILD HOST.
+WHY CHROOT BUILD: snowfall links against libdrm, libinput, cairo, libpam,
+libxkbcommon, and libudev.  Building on the host produces a binary linked
+against host library versions that may differ from the rootfs.  Building
+inside the chroot guarantees ABI compatibility at runtime.
 
 The DRM master handoff chain is:
   libreldr -> snowcone (boot splash, grabs DRM master)
            -> snowfall (login manager, takes DRM master,
                        which causes snowcone to detect the loss and exit)
-           -> user's Wayland compositor (sway, etc.)
+           -> user's Wayland compositor (sway, frostedglass, etc.)
 
-The OpenRC service file in the snowfall repo already declares
-`after snowcone`, so the runlevel-order side of the handoff is handled
-without any extra work here.
+The OpenRC service file in the snowfall repo declares `after snowcone`,
+so the runlevel-order side of the handoff is handled without extra work.
 """
 
 from __future__ import annotations
@@ -46,24 +45,13 @@ from .common import (
 SNOWFALL_REPO   = "https://github.com/BDmajora/snowfall.git"
 SNOWFALL_BRANCH = "main"
 
-# pkg-config names we expect to find on the BUILD HOST. If any are
-# missing we fail early with a helpful apt-line, the same way
-# stage_08_splash hints at linux-libc-dev.
-REQUIRED_PKGCONFIG = [
+# pkg-config names that must be present inside the chroot for building.
+CHROOT_BUILD_PKGS = [
     "libdrm",
     "libinput",
     "cairo",
     "xkbcommon",
 ]
-
-# apt-line for Debian/Ubuntu build hosts. Adjusted for the actual
-# package names (libpam doesn't have a .pc file — we check it via
-# pam_appl.h existence further down).
-APT_HINT = (
-    "apt install build-essential pkg-config "
-    "libdrm-dev libinput-dev libcairo2-dev libpam0g-dev "
-    "libxkbcommon-dev libudev-dev"
-)
 
 
 def _sha256(path: Path) -> str:
@@ -74,40 +62,9 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _check_build_host() -> None:
-    """Verify the build host has everything needed to compile snowfall."""
-    missing_tools = [t for t in ("git", "make", "cc", "pkg-config") if not have(t)]
-    if missing_tools:
-        err(f"Missing build tools on host: {', '.join(missing_tools)}")
-        err(f"Install with: {APT_HINT}")
-        sys.exit(1)
-
-    missing_pc = []
-    for name in REQUIRED_PKGCONFIG:
-        cp = run(["pkg-config", "--exists", name], check=False)
-        if cp.returncode != 0:
-            missing_pc.append(name)
-    if missing_pc:
-        err(f"Missing pkg-config modules on host: {', '.join(missing_pc)}")
-        err(f"Install with: {APT_HINT}")
-        sys.exit(1)
-
-    # PAM doesn't ship a .pc file on most distros — check the header.
-    pam_header_candidates = [
-        Path("/usr/include/security/pam_appl.h"),
-        Path("/usr/include/pam/pam_appl.h"),
-    ]
-    if not any(p.is_file() for p in pam_header_candidates):
-        err("PAM development headers not found "
-            "(/usr/include/security/pam_appl.h).")
-        err(f"Install with: {APT_HINT}")
-        sys.exit(1)
-
-
-def _ensure_snowfall(cfg: Config) -> Path:
-    """Wipe cached clone, re-clone, build, return the repo dir."""
+def _clone_source(cfg: Config) -> Path:
+    """Clone snowfall source on the host (network access)."""
     src_dir = cfg.build_dir / "snowfall"
-    bin_path = src_dir / "snowfall"
 
     if src_dir.exists():
         info(f"Removing cached snowfall clone at {src_dir} ...")
@@ -116,18 +73,13 @@ def _ensure_snowfall(cfg: Config) -> Path:
             err(f"Failed to remove {src_dir}. Check permissions.")
             sys.exit(1)
 
+    if not have("git"):
+        err("git not found on build host")
+        sys.exit(1)
+
     info(f"Cloning snowfall from {SNOWFALL_REPO} ...")
     run(["git", "clone", "--depth", "1", "-b", SNOWFALL_BRANCH,
          SNOWFALL_REPO, str(src_dir)])
-
-    info("Building snowfall ...")
-    run(["make", "-C", str(src_dir)])
-
-    if not bin_path.is_file():
-        err(f"Build finished but {bin_path} was not produced.")
-        err("Check that you have all required development headers:")
-        err(f"  {APT_HINT}")
-        sys.exit(1)
 
     return src_dir
 
@@ -148,35 +100,106 @@ def _load_integration(repo_dir: Path):
     return mod
 
 
-def _install_files(cfg: Config, repo_dir: Path, integration) -> None:
-    files = integration.FILES
+def _build_and_install_in_chroot(cfg: Config, host_src: Path, integration) -> None:
+    """Copy source into chroot, build there, install binary + configs."""
+    chroot_src = cfg.mount / "tmp" / "snowfall"
 
-    bin_src    = repo_dir / files.binary_src
-    openrc_src = repo_dir / files.openrc_src
-    pam_src    = repo_dir / files.pam_src
+    # Clean any leftover from a previous attempt
+    if chroot_src.exists():
+        shutil.rmtree(chroot_src)
 
-    # Destinations inside the target rootfs.
-    bin_dst    = cfg.mount / files.binary_dst.lstrip("/")
-    openrc_dst = cfg.mount / files.openrc_dst.lstrip("/")
-    pam_dst    = cfg.mount / files.pam_dst.lstrip("/")
+    info("Copying snowfall source into chroot ...")
+    shutil.copytree(host_src, chroot_src)
 
-    for dst in (bin_dst, openrc_dst, pam_dst):
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.exists():
-            dst.unlink()
+    chroot_mount(cfg)
+    try:
+        # Verify build toolchain
+        info("Checking chroot build toolchain ...")
+        for tool in ("gcc", "make", "pkg-config"):
+            cp = in_chroot(cfg, f"command -v {tool}", check=False)
+            if cp.returncode != 0:
+                err(f"Missing build tool in chroot: {tool}")
+                err("Ensure build toolchain packages are in YETI_PACKAGE_LIST.")
+                sys.exit(1)
 
-    shutil.copy2(bin_src,    bin_dst)
-    shutil.copy2(openrc_src, openrc_dst)
-    shutil.copy2(pam_src,    pam_dst)
+        # Verify build deps
+        info("Checking chroot build dependencies ...")
+        missing_pc = []
+        for pkg in CHROOT_BUILD_PKGS:
+            cp = in_chroot(cfg, f"pkg-config --exists {pkg}", check=False)
+            if cp.returncode != 0:
+                missing_pc.append(pkg)
+        if missing_pc:
+            err(f"Missing pkg-config modules in chroot: {', '.join(missing_pc)}")
+            err("Ensure dev headers are installed in the rootfs.")
+            sys.exit(1)
 
-    bin_dst.chmod(0o755)
-    openrc_dst.chmod(0o755)
-    pam_dst.chmod(0o644)
+        # PAM doesn't ship a .pc file — check the header inside the chroot
+        cp = in_chroot(
+            cfg,
+            "test -f /usr/include/security/pam_appl.h || "
+            "test -f /usr/include/pam/pam_appl.h",
+            check=False,
+        )
+        if cp.returncode != 0:
+            err("PAM development headers not found in chroot.")
+            err("Ensure sys-libs/pam is in YETI_PACKAGE_LIST.")
+            sys.exit(1)
 
-    if _sha256(bin_src) != _sha256(bin_dst):
-        err("snowfall binary in rootfs does not match freshly built copy!")
-        sys.exit(1)
-    ok("snowfall binary verified in rootfs")
+        # Build
+        info("Building snowfall inside chroot ...")
+        in_chroot(cfg, "make -C /tmp/snowfall clean 2>/dev/null; make -C /tmp/snowfall")
+
+        # Verify binary was produced
+        bin_chroot = chroot_src / "snowfall"
+        if not bin_chroot.is_file():
+            err("Build completed but snowfall binary was not produced.")
+            sys.exit(1)
+
+        # Install files using integration metadata
+        files = integration.FILES
+
+        # Binary
+        bin_dst = cfg.mount / files.binary_dst.lstrip("/")
+        bin_dst.parent.mkdir(parents=True, exist_ok=True)
+        if bin_dst.exists():
+            bin_dst.unlink()
+        shutil.copy2(bin_chroot, bin_dst)
+        bin_dst.chmod(0o755)
+
+        # Verify copy integrity
+        if _sha256(bin_chroot) != _sha256(bin_dst):
+            err("snowfall binary copy failed integrity check!")
+            sys.exit(1)
+        ok("snowfall binary built in chroot, installed and verified")
+
+        # OpenRC init script
+        openrc_src = chroot_src / files.openrc_src
+        openrc_dst = cfg.mount / files.openrc_dst.lstrip("/")
+        openrc_dst.parent.mkdir(parents=True, exist_ok=True)
+        if openrc_dst.exists():
+            openrc_dst.unlink()
+        shutil.copy2(openrc_src, openrc_dst)
+        openrc_dst.chmod(0o755)
+
+        # PAM config
+        pam_src = chroot_src / files.pam_src
+        pam_dst = cfg.mount / files.pam_dst.lstrip("/")
+        pam_dst.parent.mkdir(parents=True, exist_ok=True)
+        if pam_dst.exists():
+            pam_dst.unlink()
+        shutil.copy2(pam_src, pam_dst)
+        pam_dst.chmod(0o644)
+
+        # Register OpenRC service
+        in_chroot(cfg, f"rc-update add snowfall {integration.RUNLEVEL}")
+        ok(f"snowfall registered in '{integration.RUNLEVEL}' runlevel")
+
+    finally:
+        chroot_umount(cfg)
+        # Clean up source from chroot /tmp
+        if chroot_src.exists():
+            shutil.rmtree(chroot_src)
 
 
 def _ensure_sessions_dir(cfg: Config) -> None:
@@ -194,10 +217,10 @@ def _ensure_sessions_dir(cfg: Config) -> None:
 def _runtime_deps_present(cfg: Config) -> None:
     """Warn (don't fail) if runtime shared libraries aren't in the rootfs.
 
-    Snowfall links against libdrm/libinput/cairo/libpam/libxkbcommon/libudev.
-    On Gentoo these come from media-libs/mesa indirectly plus the explicit
-    package list. Missing libs would cause snowfall to fail at startup;
-    we flag it now so the user can adjust YETI_PACKAGE_LIST.
+    Since we now build inside the chroot, the binary is guaranteed to
+    link against whatever's present — but if a library is missing entirely,
+    the build would have failed already. This check is a safety net for
+    libraries that might be dlopened at runtime rather than linked.
     """
     expected = [
         "lib64/libdrm.so.2",
@@ -230,26 +253,13 @@ def _runtime_deps_present(cfg: Config) -> None:
 
 
 def run_stage(cfg: Config) -> None:
-    step_banner("Stage 9 — Install snowfall")
+    step_banner("Stage 9 — Install snowfall (chroot build)")
 
-    _check_build_host()
-
-    repo_dir = _ensure_snowfall(cfg)
+    repo_dir = _clone_source(cfg)
     integration = _load_integration(repo_dir)
 
-    _install_files(cfg, repo_dir, integration)
+    _build_and_install_in_chroot(cfg, repo_dir, integration)
     _ensure_sessions_dir(cfg)
-
-    # Register the OpenRC service inside the chroot. The snowfall.openrc
-    # file declares `after snowcone`, so the runlevel order handles the
-    # handoff at boot.
-    chroot_mount(cfg)
-    try:
-        in_chroot(cfg, f"rc-update add snowfall {integration.RUNLEVEL}")
-        ok(f"snowfall registered in '{integration.RUNLEVEL}' runlevel")
-    finally:
-        chroot_umount(cfg)
-
     _runtime_deps_present(cfg)
 
     ok("snowfall installed")

@@ -17,7 +17,7 @@ REQUIRED_HOST_TOOLS = [
     "wget", "tar", "xz",
     # Chroot
     "chroot",
-    # Fetch + build libreldr from its own repo
+    # Fetch repos + build libreldr (UEFI binary, built on host)
     "git", "make",
 ]
 

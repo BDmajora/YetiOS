@@ -113,6 +113,29 @@ YETI_PACKAGE_LIST = [
     # Seat management — required by wlroots compositors (frostedglass)
     # to acquire DRM/input device access via libseat.
     "sys-auth/seatd",
+
+    # ---- Build toolchain (for in-chroot compilation of stages 7+) ----
+    # Moonshine, snowcone, snowfall, and frostedglass are all built inside
+    # the chroot against the target's libraries to avoid ABI mismatches.
+    "sys-devel/gcc",
+    "dev-build/make",
+    "dev-build/autoconf",
+    "dev-build/automake",
+    "sys-devel/bison",
+    "sys-devel/flex",
+    "dev-util/pkgconf",
+    "sys-kernel/linux-headers",      # DRM headers for snowcone
+
+    # Moonshine (Wine fork) build deps — in addition to runtime deps above
+    "media-libs/vulkan-loader",      # (already listed for runtime)
+    "dev-libs/libxml2",              # Wine configure
+    "media-libs/alsa-lib",           # audio backend
+
+    # Snowfall build deps (headers for linking)
+    # libdrm, libinput, cairo, pam, xkbcommon already listed as runtime deps
+    # — their -dev headers are included by Gentoo's default USE flags.
+
+    # Snowcone build deps — just needs DRM headers (linux-headers above)
 ]
 
 # ---------------------------------------------------------------------------
