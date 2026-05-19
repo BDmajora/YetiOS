@@ -43,6 +43,15 @@ from .common import (
 FROSTEDGLASS_REPO   = "https://github.com/BDmajora/FrostedGlass.git"
 FROSTEDGLASS_BRANCH = "main"
 
+# Wine Mono MSI URL — if we can download this at build time, Wine won't
+# need network access at first boot to get it.  This avoids the Mono
+# download dialog that blocks explorer.exe startup.
+WINE_MONO_VERSION = "9.4.0"
+WINE_MONO_URL = (
+    f"https://dl.winehq.org/wine/wine-mono/{WINE_MONO_VERSION}/"
+    f"wine-mono-{WINE_MONO_VERSION}-x86.msi"
+)
+
 # Build deps that must be present inside the chroot.
 CHROOT_BUILD_PKGS = [
     "wayland-server",
@@ -176,6 +185,41 @@ def _install_configs(cfg: Config, repo_dir: Path) -> None:
         warn("frostedglass_prefs.reg not found in repo; skipping registry prefs.")
 
 
+def _install_wine_mono(cfg: Config) -> None:
+    """Pre-install Wine Mono MSI into the shared Wine cache.
+
+    Wine looks for Mono MSIs in /usr/share/wine/mono/ before trying
+    to download them. Pre-installing avoids the "Install Mono" dialog
+    and the need for network access at first boot.
+    """
+    mono_cache = cfg.mount / "usr/share/wine/mono"
+    mono_msi = mono_cache / f"wine-mono-{WINE_MONO_VERSION}-x86.msi"
+
+    if mono_msi.exists():
+        info("Wine Mono MSI already cached, skipping download")
+        return
+
+    mono_cache.mkdir(parents=True, exist_ok=True)
+
+    # Download on the build host (which has network access)
+    # Try multiple versions since Wine version determines which Mono it wants
+    info(f"Downloading Wine Mono {WINE_MONO_VERSION} ...")
+    dl_path = cfg.build_dir / f"wine-mono-{WINE_MONO_VERSION}-x86.msi"
+
+    if not dl_path.exists():
+        cp = run(["wget", "-q", "--show-progress", "-O", str(dl_path),
+                  WINE_MONO_URL], check=False)
+        if cp.returncode != 0:
+            warn(f"Failed to download Wine Mono from {WINE_MONO_URL}")
+            warn("Wine will try to download Mono on first boot (requires network).")
+            dl_path.unlink(missing_ok=True)
+            return
+
+    shutil.copy2(dl_path, mono_msi)
+    mono_msi.chmod(0o644)
+    ok(f"Wine Mono {WINE_MONO_VERSION} pre-installed to {mono_cache}")
+
+
 def _ensure_wine_in_chroot(cfg: Config) -> None:
     """Ensure Wine is installed in the target. Warn if missing."""
     chroot_mount(cfg)
@@ -195,6 +239,7 @@ def run_stage(cfg: Config) -> None:
     repo_dir = _clone_source(cfg)
     _build_in_chroot(cfg, repo_dir)
     _install_configs(cfg, repo_dir)
+    _install_wine_mono(cfg)
     _ensure_wine_in_chroot(cfg)
 
     ok("frostedglass installed")

@@ -14,7 +14,29 @@ from .common import (
     step_banner,
     warn,
 )
-from .templates import LIBRELDR_REGISTER_SERVICE, YETI_PACKAGE_LIST
+from .templates import (
+    LIBRELDR_REGISTER_SERVICE,
+    WINE_FIRSTBOOT_SERVICE,
+    YETI_PACKAGE_LIST,
+)
+
+
+def _install_wine_firstboot(cfg: Config) -> None:
+    """Install a one-shot service that initializes the Wine prefix on first boot.
+
+    This ensures Wine Mono/Gecko get downloaded while networking is available,
+    and applies our registry prefs to a fresh prefix.
+    """
+    info("Installing wine-firstboot service ...")
+
+    svc_text = WINE_FIRSTBOOT_SERVICE.format(yeti_user=cfg.yeti_user)
+    svc_path = cfg.mount / "etc/init.d/wine-firstboot"
+    svc_path.parent.mkdir(parents=True, exist_ok=True)
+    svc_path.write_text(svc_text)
+    svc_path.chmod(0o755)
+
+    in_chroot(cfg, "rc-update add wine-firstboot default")
+    ok("wine-firstboot service installed and enabled")
 
 
 def run_stage(cfg: Config) -> None:
@@ -71,6 +93,8 @@ def run_stage(cfg: Config) -> None:
         in_chroot(cfg, "emerge --depclean --quiet")
 
         # 7. Run post-install script from postbuild.sh
+        #    This handles: user creation, hostname, timezone, locale,
+        #    dhcpcd config + service, seatd, elogind, dbus, sudoers.
         postbuild_src = (Path(__file__).resolve().parent.parent / "postbuild.sh").read_text()
         postbuild = postbuild_src.format(
             yeti_user=cfg.yeti_user,
@@ -89,7 +113,10 @@ def run_stage(cfg: Config) -> None:
         in_chroot(cfg, "rc-update add libreldr-register default")
         ok("libreldr-register service installed and enabled")
 
-        # 9. Verify user was actually created
+        # 9. Install Wine first-boot initializer (prefix init + Mono download)
+        _install_wine_firstboot(cfg)
+
+        # 10. Verify user was actually created
         check = (cfg.mount / "etc" / "passwd")
         if cfg.yeti_user not in check.read_text():
             err(f"User '{cfg.yeti_user}' was NOT found in /etc/passwd after postbuild!")

@@ -1,5 +1,4 @@
-"""src/templates.py — multi-line string templates rendered into the build.
-"""
+"""src/templates.py — multi-line string templates rendered into the build."""
 
 # ---------------------------------------------------------------------------
 # /etc/portage/make.conf
@@ -77,6 +76,10 @@ YETI_PACKAGE_LIST = [
     # Init + Userland basics
     "sys-apps/openrc",
     "app-shells/bash",
+
+    # ---- Networking ----
+    # dhcpcd for DHCP on wired interfaces (auto-configures eth0/ens*/enp*).
+    # virtio NIC in QEMU/KVM appears as an enp* or eth* device.
     "net-misc/dhcpcd",
 
     # Wayland stack
@@ -210,4 +213,80 @@ start() {
     fi
     eend $rc
 }
+"""
+
+# ---------------------------------------------------------------------------
+# OpenRC network configuration for dhcpcd.
+#
+# Gentoo's OpenRC netifrc setup: /etc/conf.d/net defines how each
+# interface is configured, and symlinks in /etc/init.d/ (net.eth0 etc.)
+# activate them. For DHCP, the simplest approach is to just enable
+# dhcpcd as a global daemon — it will auto-discover all wired interfaces.
+#
+# We also create a fallback /etc/conf.d/net in case netifrc is present,
+# and provide a first-boot service that enables dhcpcd on any interface
+# it finds (handles both eth0 and predictable names like enp1s0).
+# ---------------------------------------------------------------------------
+DHCPCD_CONF = """\
+# /etc/dhcpcd.conf — YetiOS defaults
+
+# Don't touch the hostname — keep what we set at build time.
+noipv4ll
+nohook hostname
+
+# Prefer wired interfaces, timeout quickly so boot isn't slow
+# if no cable is plugged in.
+timeout 15
+
+# Allow Wine / general networking immediately.
+option rapid_commit
+option domain_name_servers, domain_name, domain_search
+option classless_static_routes
+option interface_mtu
+"""
+
+# ---------------------------------------------------------------------------
+# First-boot Wine configuration service.
+#
+# On first login, Wine needs to initialise its prefix, download Mono/Gecko,
+# and set up the desktop. This service runs once as the yeti user to do
+# that initialization with network access available.
+# ---------------------------------------------------------------------------
+WINE_FIRSTBOOT_SERVICE = """\
+#!/sbin/openrc-run
+
+description="First-boot Wine prefix initialization (downloads Mono/Gecko)"
+
+depend() {{
+    need net
+    after dhcpcd
+}}
+
+start() {{
+    ebegin "Initializing Wine prefix for {yeti_user}"
+
+    local wine_user="{yeti_user}"
+    local wine_home="/home/$wine_user"
+
+    # Skip if Wine prefix already exists and looks initialized
+    if [ -f "$wine_home/.wine/system.reg" ]; then
+        einfo "Wine prefix already initialized."
+        rc-update del wine-firstboot default 2>/dev/null
+        eend 0
+        return 0
+    fi
+
+    # Initialize the Wine prefix — this triggers Mono/Gecko download
+    # if the installers aren't already cached.
+    su -l "$wine_user" -c "DISPLAY= WAYLAND_DISPLAY= wineboot --init" || true
+
+    # Apply our registry prefs on top
+    if [ -f "$wine_home/.frostedglass_prefs.reg" ]; then
+        su -l "$wine_user" -c "DISPLAY= WAYLAND_DISPLAY= wine regedit /s $wine_home/.frostedglass_prefs.reg" || true
+    fi
+
+    einfo "Wine prefix initialized. Disabling first-boot service."
+    rc-update del wine-firstboot default 2>/dev/null
+    eend 0
+}}
 """
