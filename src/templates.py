@@ -100,6 +100,10 @@ YETI_PACKAGE_LIST = [
 
     # Moonshine (Wine fork) runtime deps — needed inside the rootfs
     # so Moonshine binaries installed by stage 07 can actually run.
+    # NOTE: wlr-randr is NOT in the main Gentoo repo (GURU overlay only).
+    # It is built from source in stage 06 after emerge finishes.
+    # desk.cpl calls it at runtime for display mode control.
+
     "media-libs/vulkan-loader",     # libvulkan.so for Vulkan rendering
     "media-libs/freetype",          # font rendering
     "media-libs/fontconfig",        # font configuration
@@ -119,6 +123,7 @@ YETI_PACKAGE_LIST = [
     # the chroot against the target's libraries to avoid ABI mismatches.
     "sys-devel/gcc",
     "dev-build/make",
+    "dev-build/meson",               # meson build system (for wlr-randr)
     "dev-build/autoconf",
     "dev-build/automake",
     "sys-devel/bison",
