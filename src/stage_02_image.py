@@ -34,13 +34,26 @@ def run_create(cfg: Config) -> None:
         run(["qemu-img", "create", "-f", "raw", str(cfg.img_path),
              f"{cfg.img_size_gb}G"])
 
+    # Write the label and partitions first.
     run([
         "parted", "-s", str(cfg.img_path),
         "mklabel", "gpt",
         "mkpart", "ESP", "fat32", "1MiB", "513MiB",
-        "set", "1", "esp", "on",
         "mkpart", "ROOT", "ext4", "513MiB", "100%",
     ])
+
+    # Set the ESP flag in a SEPARATE invocation. Combining `set` with
+    # mklabel/mkpart in one parted call can silently fail to commit the
+    # flag, which leaves partition 1 without the ESP type GUID — and UEFI
+    # firmware identifies the ESP by that GUID, not by name. (See
+    # inspect_image.py for the diagnosis.)
+    run(["parted", "-s", str(cfg.img_path), "set", "1", "esp", "on"])
+
+    # Verify the flag actually stuck before moving on.
+    cp = run(["parted", "-s", str(cfg.img_path), "print"], capture=True)
+    if "esp" not in cp.stdout.lower():
+        warn("parted did not report the esp flag on partition 1 — "
+             "the firmware may not recognize the ESP.")
 
     ok("partition table written")
 

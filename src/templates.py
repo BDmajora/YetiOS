@@ -14,6 +14,14 @@ FFLAGS="${{COMMON_FLAGS}}"
 
 CHOST="x86_64-pc-linux-gnu"
 MAKEOPTS="-j{jobs}"
+
+# Keep the stage3's running interpreter (3.13) AND the binhost's target
+# (3.14) both enabled through the build. Dropping 3.13 makes portage delete
+# its own running modules mid-upgrade (ModuleNotFoundError: _SyncfsProcess).
+# Single-target packages use 3.14; multi-target ones build for both.
+PYTHON_TARGETS="python3_13 python3_14"
+PYTHON_SINGLE_TARGET="python3_14"
+
 EMERGE_DEFAULT_OPTS="--getbinpkg --binpkg-respect-use=y --jobs={jobs} --keep-going"
 
 FEATURES="getbinpkg binpkg-request-signature parallel-fetch parallel-install"

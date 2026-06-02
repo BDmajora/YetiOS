@@ -115,26 +115,64 @@ def run_stage(cfg: Config) -> None:
             "echo 'sys-auth/seatd server' > /etc/portage/package.use/seatd",
         )
 
+        # 3b. Upgrade portage in place BEFORE the @world update.
+        #     The stage3 runs portage on python3.13 while the binhost ships
+        #     portage built for python3_14. As long as PYTHON_TARGETS keeps
+        #     python3_13 alongside python3_14 (see PORTAGE_MAKE_CONF), the new
+        #     portage reinstalls its 3.13 files too — including
+        #     portage.dbapi._SyncfsProcess — so the still-running 3.13 process
+        #     can import it in _post_merge_sync. Pinning to python3_14-only
+        #     deletes those files out from under the running process mid-merge
+        #     and crashes with ModuleNotFoundError.
+        info("Upgrading portage before @world update...")
+        in_chroot(cfg, "emerge --oneshot --usepkg=n sys-apps/portage")
+        ok("portage upgraded")
+
         # --load-average keeps the host from locking up under heavy parallelism.
-        # --usepkg=n forces emerge to re-fetch/rebuild every time instead of
-        # silently skipping already-cached packages.
-        # --noreplace (not --oneshot) ensures packages are recorded in the world
-        # file so that depclean does not treat them as orphans and remove them.
-        parallel_flags = f"--jobs={cfg.jobs} --load-average={float(cfg.jobs) * 0.9} --usepkg=n"
+        # NOTE: --usepkg=n does NOT reliably disable binpkgs here, because
+        # --getbinpkg in EMERGE_DEFAULT_OPTS re-enables them. That's fine for
+        # speed; don't rely on this flag to force source builds.
+        parallel_flags = f"--jobs={cfg.jobs} --load-average={float(cfg.jobs) * 0.9}"
 
         # 4. Sync @world
+        #    --with-bdeps=y pulls build-time deps (jinja2, markupsafe, etc.)
+        #    into the graph so target mismatches get reconciled here instead
+        #    of blowing up depclean later.
         info(f"Updating base system using {cfg.jobs} parallel jobs...")
-        in_chroot(cfg, f"emerge --update --deep --newuse {parallel_flags} @world")
+        in_chroot(
+            cfg,
+            f"emerge --update --deep --newuse --with-bdeps=y {parallel_flags} @world",
+        )
 
-        # 5. Install YetiOS userland
-        # --noreplace: skip already-installed atoms but still write them to world.
-        # --usepkg=n:  never use cached binpkgs — always fetch/build fresh.
+        # 5. Install YetiOS userland.
+        #    --noreplace: skip already-installed atoms but still write them to world.
         info(f"Installing YetiOS userland using {cfg.jobs} parallel jobs...")
-        in_chroot(cfg, f"emerge --noreplace {parallel_flags} {' '.join(YETI_PACKAGE_LIST)}")
+        in_chroot(
+            cfg,
+            f"emerge --noreplace {parallel_flags} {' '.join(YETI_PACKAGE_LIST)}",
+        )
 
-        # 6. Remove orphaned packages
-        # Safe now because step 5 populated /var/lib/portage/world.
-        in_chroot(cfg, "emerge --depclean --quiet")
+        # 6a. Reconcile any remaining Python-target mismatch BEFORE depclean.
+        #     Rebuilding both from source makes them agree on the active
+        #     PYTHON_TARGETS. Cheap insurance.
+        info("Reconciling Python targets (markupsafe + jinja2 from source)...")
+        in_chroot(
+            cfg,
+            f"emerge --oneshot --getbinpkg=n --usepkg=n {parallel_flags} "
+            "dev-python/markupsafe dev-python/jinja2",
+        )
+
+        # 6b. Remove orphaned packages.
+        #     depclean is cleanup only — a non-zero exit must not fail the
+        #     whole build. If the graph still isn't fully resolvable, depclean
+        #     refuses to run, which is harmless: extra build deps just stay on
+        #     disk and the image still boots.
+        cp = in_chroot(cfg, "emerge --depclean --quiet", check=False)
+        if cp.returncode != 0:
+            warn("depclean did not complete cleanly; leaving orphans in place.")
+            warn("This does not affect bootability — build continues.")
+        else:
+            ok("orphaned packages removed")
 
         # 7. Build wlr-randr from source (not in main Gentoo repo).
         #    Must run after emerge so meson + wayland-client are present.

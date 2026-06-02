@@ -29,18 +29,20 @@ def run_stage(cfg: Config) -> None:
         ])
     except subprocess.CalledProcessError:
         err("Tar extraction failed! The archive is likely a corrupt text/HTML file.")
-        
+
         # 1. Kill the corrupt tarball
         if cfg.stage3_tarball.exists():
             warn(f"Removing corrupt archive: {cfg.stage3_tarball}")
             run(["sudo", "rm", "-f", str(cfg.stage3_tarball)])
-            
-        # 2. Kill the Stage 3 marker so the orchestrator re-fetches next time
-        marker = cfg.build_dir / ".stage_03_fetch"
+
+        # 2. Kill the Stage 3 marker so the orchestrator re-fetches next time.
+        #    Markers live in build_dir/.yeti-state/<stage> (see BuildState),
+        #    NOT build_dir/.stage_03_fetch — the old path silently did nothing.
+        marker = cfg.build_dir / ".yeti-state" / "03_fetch"
         if marker.exists():
             warn(f"Removing Stage 3 marker to force re-fetch: {marker}")
             run(["sudo", "rm", "-f", str(marker)])
-            
+
         raise  # Crash out so the user can re-run
 
     # Ensure critical portage directories exist with proper permissions
