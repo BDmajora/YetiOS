@@ -115,18 +115,39 @@ def run_stage(cfg: Config) -> None:
             "echo 'sys-auth/seatd server' > /etc/portage/package.use/seatd",
         )
 
-        # 3b. Upgrade portage in place BEFORE the @world update.
-        #     The stage3 runs portage on python3.13 while the binhost ships
-        #     portage built for python3_14. As long as PYTHON_TARGETS keeps
-        #     python3_13 alongside python3_14 (see PORTAGE_MAKE_CONF), the new
-        #     portage reinstalls its 3.13 files too — including
-        #     portage.dbapi._SyncfsProcess — so the still-running 3.13 process
-        #     can import it in _post_merge_sync. Pinning to python3_14-only
-        #     deletes those files out from under the running process mid-merge
-        #     and crashes with ModuleNotFoundError.
+        # 3b. Two-phase Python migration.
+        #
+        #   Phase 1 — upgrade portage with BOTH python3_13 + python3_14
+        #   enabled (set in PORTAGE_MAKE_CONF). The stage3 runs portage on
+        #   3.13 while the binhost ships portage built for 3.14. Keeping 3.13
+        #   in PYTHON_TARGETS means the new portage reinstalls its 3.13 files
+        #   too — including portage.dbapi._SyncfsProcess — so the still-running
+        #   3.13 process can import it in _post_merge_sync. Pinning to 3.14
+        #   only here deletes those files out from under the running process
+        #   mid-merge and crashes with ModuleNotFoundError.
         info("Upgrading portage before @world update...")
         in_chroot(cfg, "emerge --oneshot --usepkg=n sys-apps/portage")
         ok("portage upgraded")
+
+        #   Phase 2 — portage now runs fine on 3.14, so commit the whole
+        #   system to python3_14 ONLY. This stops every Python package being
+        #   built twice and kills the fragile python3_13 source builds (e.g.
+        #   dev-python/pillow, which was dying on its 3.13 wheel). Switch the
+        #   active interpreter, then narrow PYTHON_TARGETS / PYTHON_SINGLE_TARGET
+        #   in make.conf. The --newuse in step 4 rebuilds for 3.14 only and
+        #   depclean drops 3.13 at the end.
+        info("Committing system to python3.14 only...")
+        in_chroot(
+            cfg,
+            "emerge --oneshot --usepkg=n app-eselect/eselect-python dev-lang/python:3.14 && "
+            "eselect python update && "
+            "eselect python set python3.14 && "
+            "sed -i "
+            "-e 's/^PYTHON_TARGETS=.*/PYTHON_TARGETS=\"python3_14\"/' "
+            "-e 's/^PYTHON_SINGLE_TARGET=.*/PYTHON_SINGLE_TARGET=\"python3_14\"/' "
+            "/etc/portage/make.conf",
+        )
+        ok("python3.14 is now the sole Python target")
 
         # --load-average keeps the host from locking up under heavy parallelism.
         # NOTE: --usepkg=n does NOT reliably disable binpkgs here, because
@@ -137,7 +158,8 @@ def run_stage(cfg: Config) -> None:
         # 4. Sync @world
         #    --with-bdeps=y pulls build-time deps (jinja2, markupsafe, etc.)
         #    into the graph so target mismatches get reconciled here instead
-        #    of blowing up depclean later.
+        #    of blowing up depclean later. --newuse picks up the now-narrowed
+        #    PYTHON_TARGETS and rebuilds the affected packages for 3.14 only.
         info(f"Updating base system using {cfg.jobs} parallel jobs...")
         in_chroot(
             cfg,
@@ -162,7 +184,7 @@ def run_stage(cfg: Config) -> None:
             "dev-python/markupsafe dev-python/jinja2",
         )
 
-        # 6b. Remove orphaned packages.
+        # 6b. Remove orphaned packages (also drops the now-unused python:3.13).
         #     depclean is cleanup only — a non-zero exit must not fail the
         #     whole build. If the graph still isn't fully resolvable, depclean
         #     refuses to run, which is harmless: extra build deps just stay on
