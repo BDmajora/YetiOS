@@ -132,6 +132,7 @@ YETI_PACKAGE_LIST = [
     "sys-devel/gcc",
     "dev-build/make",
     "dev-build/meson",               # meson build system (for wlr-randr)
+    "dev-vcs/git",                   # git clone for wlr-randr (hosted on SourceHut)
     "dev-build/autoconf",
     "dev-build/automake",
     "sys-devel/bison",

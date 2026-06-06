@@ -25,10 +25,7 @@ from .templates import (
 # desk.cpl uses it at runtime for resolution / refresh / VRR control.
 # ---------------------------------------------------------------------------
 WLR_RANDR_VERSION = "0.5.0"
-WLR_RANDR_URL = (
-    f"https://gitlab.freedesktop.org/emersion/wlr-randr/-/archive/"
-    f"v{WLR_RANDR_VERSION}/wlr-randr-v{WLR_RANDR_VERSION}.tar.gz"
-)
+WLR_RANDR_REPO = "https://gitlab.freedesktop.org/emersion/wlr-randr.git"
 
 
 def _build_wlr_randr(cfg: Config) -> None:
@@ -45,12 +42,9 @@ def _build_wlr_randr(cfg: Config) -> None:
 set -e
 cd /tmp
 
-# Download
-wget -q '{WLR_RANDR_URL}' -O wlr-randr.tar.gz
-
-# Extract
-tar xzf wlr-randr.tar.gz
-cd wlr-randr-v{WLR_RANDR_VERSION}
+# Clone
+git clone --branch v{WLR_RANDR_VERSION} --depth 1 '{WLR_RANDR_REPO}' wlr-randr
+cd wlr-randr
 
 # Build
 meson setup build --prefix=/usr --buildtype=release
@@ -61,7 +55,7 @@ ninja -C build install
 
 # Cleanup
 cd /tmp
-rm -rf wlr-randr-v{WLR_RANDR_VERSION} wlr-randr.tar.gz
+rm -rf wlr-randr
 """
     in_chroot(cfg, build_script)
     ok(f"wlr-randr {WLR_RANDR_VERSION} installed to /usr/bin/wlr-randr")
