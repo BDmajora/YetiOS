@@ -27,38 +27,146 @@ from .templates import (
 WLR_RANDR_VERSION = "0.5.0"
 WLR_RANDR_REPO = "https://gitlab.freedesktop.org/emersion/wlr-randr.git"
 
+# ---------------------------------------------------------------------------
+# System sound generator.
+#
+# Installed to /usr/lib/yetios/gen-media.py. frostedglass runs it during
+# first-boot prefix initialization, writing the system event sounds DIRECTLY
+# into the NT file structure (C:\windows\Media) — the canonical, themeable
+# location. No audio assets are stored in the Linux tree; replace the .wav
+# files in C:\windows\Media to retheme.
+# ---------------------------------------------------------------------------
+GEN_MEDIA_PY = '''\
+#!/usr/bin/env python3
+"""Generate the YetiOS system event sounds (ding/chord/tada) as 16-bit
+44.1 kHz mono WAVs into the directory given as argv[1] — normally the Wine
+prefix's drive_c/windows/Media. Idempotent: existing files are kept, so
+user-themed replacements survive."""
+
+import math
+import os
+import struct
+import sys
+import wave
+
+RATE = 44100
+
+
+def synth(notes, total):
+    """notes: list of (freq_hz, start_s, dur_s, amp). Returns sample list."""
+    n = int(total * RATE)
+    buf = [0.0] * n
+    for freq, start, dur, amp in notes:
+        s0 = int(start * RATE)
+        nd = int(dur * RATE)
+        for i in range(nd):
+            t = i / RATE
+            # 5 ms attack, exponential decay — no clicks, bell-like tail
+            env = min(1.0, t / 0.005) * math.exp(-3.5 * t / dur)
+            v = amp * env * math.sin(2 * math.pi * freq * t)
+            # soft second harmonic for warmth
+            v += 0.25 * amp * env * math.sin(4 * math.pi * freq * t)
+            if s0 + i < n:
+                buf[s0 + i] += v
+    return buf
+
+
+def write_wav(path, samples):
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        frames = bytearray()
+        for s in samples:
+            s = max(-1.0, min(1.0, s))
+            frames += struct.pack("<h", int(s * 32000))
+        w.writeframes(bytes(frames))
+
+
+SOUNDS = {
+    # short two-note chime — the default beep
+    "ding.wav": ([(1318.51, 0.00, 0.18, 0.40),
+                  (1046.50, 0.10, 0.35, 0.40)],
+                 0.50),
+
+    # solemn triad — errors / critical stop / disconnect
+    "chord.wav": ([(523.25, 0.0, 0.55, 0.30),
+                   (659.25, 0.0, 0.55, 0.28),
+                   (783.99, 0.0, 0.55, 0.26)],
+                  0.60),
+
+    # rising arpeggio — logon
+    "tada.wav": ([(523.25, 0.00, 0.14, 0.36),
+                  (659.25, 0.09, 0.14, 0.36),
+                  (783.99, 0.18, 0.14, 0.36),
+                  (1046.50, 0.27, 0.50, 0.40)],
+                 0.85),
+}
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("usage: gen-media.py <target-dir>", file=sys.stderr)
+        return 1
+
+    target = sys.argv[1]
+    os.makedirs(target, exist_ok=True)
+
+    for name, (notes, total) in SOUNDS.items():
+        path = os.path.join(target, name)
+
+        if os.path.exists(path):
+            continue
+
+        write_wav(path, synth(notes, total))
+        print(f"generated {path}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
 
 def _build_wlr_randr(cfg: Config) -> None:
-    """Download and build wlr-randr from source inside the chroot.
+    """Download and build wlr-randr from source inside the chroot."""
 
-    wlr-randr is only available in the Gentoo GURU overlay, which we
-    don't enable.  It's a tiny meson project (~200 lines) whose only
-    deps are wayland-client and wayland-protocols — both already
-    installed by this point.
-    """
     info(f"Building wlr-randr {WLR_RANDR_VERSION} from source ...")
 
     build_script = f"""\
 set -e
 cd /tmp
 
-# Clone
 git clone --branch v{WLR_RANDR_VERSION} --depth 1 '{WLR_RANDR_REPO}' wlr-randr
 cd wlr-randr
 
-# Build
 meson setup build --prefix=/usr --buildtype=release
 ninja -C build
 
-# Install
 ninja -C build install
 
-# Cleanup
 cd /tmp
 rm -rf wlr-randr
 """
+
     in_chroot(cfg, build_script)
+
     ok(f"wlr-randr {WLR_RANDR_VERSION} installed to /usr/bin/wlr-randr")
+
+
+def _install_media_generator(cfg: Config) -> None:
+    """Install the system-sound generator script."""
+
+    info("Installing system-sound generator ...")
+
+    gen_path = cfg.mount / "usr/lib/yetios/gen-media.py"
+
+    gen_path.parent.mkdir(parents=True, exist_ok=True)
+    gen_path.write_text(GEN_MEDIA_PY)
+    gen_path.chmod(0o755)
+
+    ok("gen-media.py installed to /usr/lib/yetios/")
 
 
 def _install_wine_firstboot(cfg: Config) -> None:
@@ -67,14 +175,22 @@ def _install_wine_firstboot(cfg: Config) -> None:
     Ensures Wine Mono/Gecko are downloaded while networking is available,
     and applies registry prefs to a fresh prefix.
     """
+
     info("Installing wine-firstboot service ...")
 
     svc_path = cfg.mount / "etc/init.d/wine-firstboot"
+
     svc_path.parent.mkdir(parents=True, exist_ok=True)
-    svc_path.write_text(WINE_FIRSTBOOT_SERVICE.format(yeti_user=cfg.yeti_user))
+
+    service_text = WINE_FIRSTBOOT_SERVICE.format(
+        yeti_user=cfg.yeti_user
+    )
+
+    svc_path.write_text(service_text)
     svc_path.chmod(0o755)
 
     in_chroot(cfg, "rc-update add wine-firstboot default")
+
     ok("wine-firstboot service installed and enabled")
 
 
@@ -82,8 +198,16 @@ def run_stage(cfg: Config) -> None:
     step_banner("Stage 6 — Install Base Packages")
 
     chroot_mount(cfg)
+
     try:
-        # 1. Kernel/dracut bootstrap marker
+        # Ensure /dev/shm exists
+        in_chroot(
+            cfg,
+            "mkdir -p /dev/shm && "
+            "mount -t tmpfs tmpfs /dev/shm -o mode=1777"
+        )
+
+        # Kernel/dracut bootstrap marker
         in_chroot(
             cfg,
             "mkdir -p /etc/kernel/preinst.d && "
@@ -91,7 +215,7 @@ def run_stage(cfg: Config) -> None:
             "echo 'root=LABEL=yetios-root ro quiet' > /etc/kernel/cmdline",
         )
 
-        # 2. Pre-accept licenses
+        # Pre-accept licenses
         in_chroot(
             cfg,
             "mkdir -p /etc/portage/package.license && "
@@ -101,39 +225,34 @@ def run_stage(cfg: Config) -> None:
             ">> /etc/portage/package.license/firmware",
         )
 
-        # 3. USE flags
+        # USE flags
         in_chroot(
             cfg,
             "mkdir -p /etc/portage/package.use && "
-            "echo 'sys-kernel/installkernel dracut' > /etc/portage/package.use/installkernel && "
-            "echo 'sys-auth/seatd server' > /etc/portage/package.use/seatd",
+            "echo 'sys-kernel/installkernel dracut' "
+            "> /etc/portage/package.use/installkernel && "
+            "echo 'sys-auth/seatd server' "
+            "> /etc/portage/package.use/seatd",
         )
 
-        # 3b. Two-phase Python migration.
-        #
-        #   Phase 1 — upgrade portage with BOTH python3_13 + python3_14
-        #   enabled (set in PORTAGE_MAKE_CONF). The stage3 runs portage on
-        #   3.13 while the binhost ships portage built for 3.14. Keeping 3.13
-        #   in PYTHON_TARGETS means the new portage reinstalls its 3.13 files
-        #   too — including portage.dbapi._SyncfsProcess — so the still-running
-        #   3.13 process can import it in _post_merge_sync. Pinning to 3.14
-        #   only here deletes those files out from under the running process
-        #   mid-merge and crashes with ModuleNotFoundError.
+        # Upgrade portage first
         info("Upgrading portage before @world update...")
-        in_chroot(cfg, "emerge --oneshot --usepkg=n sys-apps/portage")
-        ok("portage upgraded")
 
-        #   Phase 2 — portage now runs fine on 3.14, so commit the whole
-        #   system to python3_14 ONLY. This stops every Python package being
-        #   built twice and kills the fragile python3_13 source builds (e.g.
-        #   dev-python/pillow, which was dying on its 3.13 wheel). Switch the
-        #   active interpreter, then narrow PYTHON_TARGETS / PYTHON_SINGLE_TARGET
-        #   in make.conf. The --newuse in step 4 rebuilds for 3.14 only and
-        #   depclean drops 3.13 at the end.
-        info("Committing system to python3.14 only...")
         in_chroot(
             cfg,
-            "emerge --oneshot --usepkg=n app-eselect/eselect-python dev-lang/python:3.14 && "
+            "emerge --oneshot --usepkg=n sys-apps/portage"
+        )
+
+        ok("portage upgraded")
+
+        # Commit to Python 3.14 only
+        info("Committing system to python3.14 only...")
+
+        in_chroot(
+            cfg,
+            "emerge --oneshot --usepkg=n "
+            "app-eselect/eselect-python "
+            "dev-lang/python:3.14 && "
             "eselect python update && "
             "eselect python set python3.14 && "
             "sed -i "
@@ -141,63 +260,69 @@ def run_stage(cfg: Config) -> None:
             "-e 's/^PYTHON_SINGLE_TARGET=.*/PYTHON_SINGLE_TARGET=\"python3_14\"/' "
             "/etc/portage/make.conf",
         )
+
         ok("python3.14 is now the sole Python target")
 
-        # --load-average keeps the host from locking up under heavy parallelism.
-        # NOTE: --usepkg=n does NOT reliably disable binpkgs here, because
-        # --getbinpkg in EMERGE_DEFAULT_OPTS re-enables them. That's fine for
-        # speed; don't rely on this flag to force source builds.
-        parallel_flags = f"--jobs={cfg.jobs} --load-average={float(cfg.jobs) * 0.9}"
+        parallel_flags = (
+            f"--jobs={cfg.jobs} "
+            f"--load-average={float(cfg.jobs) * 0.9}"
+        )
 
-        # 4. Sync @world
-        #    --with-bdeps=y pulls build-time deps (jinja2, markupsafe, etc.)
-        #    into the graph so target mismatches get reconciled here instead
-        #    of blowing up depclean later. --newuse picks up the now-narrowed
-        #    PYTHON_TARGETS and rebuilds the affected packages for 3.14 only.
+        # Update @world
         info(f"Updating base system using {cfg.jobs} parallel jobs...")
+
         in_chroot(
             cfg,
-            f"emerge --update --deep --newuse --with-bdeps=y {parallel_flags} @world",
+            f"emerge --update --deep --newuse "
+            f"--with-bdeps=y {parallel_flags} @world",
         )
 
-        # 5. Install YetiOS userland.
-        #    --noreplace: skip already-installed atoms but still write them to world.
+        # Install YetiOS userland
         info(f"Installing YetiOS userland using {cfg.jobs} parallel jobs...")
+
         in_chroot(
             cfg,
-            f"emerge --noreplace {parallel_flags} {' '.join(YETI_PACKAGE_LIST)}",
+            f"emerge --noreplace {parallel_flags} "
+            f"{' '.join(YETI_PACKAGE_LIST)}",
         )
 
-        # 6a. Reconcile any remaining Python-target mismatch BEFORE depclean.
-        #     Rebuilding both from source makes them agree on the active
-        #     PYTHON_TARGETS. Cheap insurance.
-        info("Reconciling Python targets (markupsafe + jinja2 from source)...")
+        # Reconcile Python targets
+        info("Reconciling Python targets...")
+
         in_chroot(
             cfg,
-            f"emerge --oneshot --getbinpkg=n --usepkg=n {parallel_flags} "
-            "dev-python/markupsafe dev-python/jinja2",
+            f"emerge --oneshot --getbinpkg=n --usepkg=n "
+            f"{parallel_flags} "
+            "dev-python/markupsafe "
+            "dev-python/jinja2",
         )
 
-        # 6b. Remove orphaned packages (also drops the now-unused python:3.13).
-        #     depclean is cleanup only — a non-zero exit must not fail the
-        #     whole build. If the graph still isn't fully resolvable, depclean
-        #     refuses to run, which is harmless: extra build deps just stay on
-        #     disk and the image still boots.
-        cp = in_chroot(cfg, "emerge --depclean --quiet", check=False)
+        # depclean
+        cp = in_chroot(
+            cfg,
+            "emerge --depclean --quiet",
+            check=False,
+        )
+
         if cp.returncode != 0:
-            warn("depclean did not complete cleanly; leaving orphans in place.")
-            warn("This does not affect bootability — build continues.")
+            warn("depclean did not complete cleanly.")
+            warn("Build continues.")
         else:
             ok("orphaned packages removed")
 
-        # 7. Build wlr-randr from source (not in main Gentoo repo).
-        #    Must run after emerge so meson + wayland-client are present.
+        # Build wlr-randr
         _build_wlr_randr(cfg)
 
-        # 8. Post-install: user creation, hostname, timezone, locale,
-        #    dhcpcd, seatd, elogind, dbus, sudoers.
+        # Install media generator
+        _install_media_generator(cfg)
+
+        # Post-install config
         info("Running post-install configuration...")
-        postbuild_src = (Path(__file__).resolve().parent.parent / "postbuild.sh").read_text()
+
+        postbuild_src = (
+            Path(__file__).resolve().parent.parent / "postbuild.sh"
+        ).read_text()
+
         in_chroot(
             cfg,
             postbuild_src.format(
@@ -207,24 +332,45 @@ def run_stage(cfg: Config) -> None:
             ),
         )
 
-        # 9. First-boot UEFI registration service
+        # libreldr-register service
         info("Installing libreldr-register first-boot service...")
+
         svc_path = cfg.mount / "etc/init.d/libreldr-register"
+
         svc_path.parent.mkdir(parents=True, exist_ok=True)
+
         svc_path.write_text(LIBRELDR_REGISTER_SERVICE)
         svc_path.chmod(0o755)
+
         in_chroot(cfg, "rc-update add libreldr-register default")
+
         ok("libreldr-register service installed and enabled")
 
-        # 10. Wine prefix first-boot initializer
+        # Wine firstboot initializer
         _install_wine_firstboot(cfg)
 
-        # 11. Sanity-check: ensure the user was actually created
-        if cfg.yeti_user not in (cfg.mount / "etc/passwd").read_text():
-            err(f"User '{cfg.yeti_user}' was NOT found in /etc/passwd after postbuild!")
+        # Verify user creation
+        if cfg.yeti_user not in (
+            cfg.mount / "etc/passwd"
+        ).read_text():
+            err(
+                f"User '{cfg.yeti_user}' was NOT found "
+                "in /etc/passwd after postbuild!"
+            )
             raise RuntimeError("User creation failed")
+
         ok(f"User '{cfg.yeti_user}' verified in /etc/passwd.")
 
-        ok(f"Installed {len(YETI_PACKAGE_LIST)} core packages + wlr-randr.")
+        ok(
+            f"Installed {len(YETI_PACKAGE_LIST)} "
+            "core packages + wlr-randr."
+        )
+
     finally:
+        in_chroot(
+            cfg,
+            "umount /dev/shm 2>/dev/null || true",
+            check=False,
+        )
+
         chroot_umount(cfg)

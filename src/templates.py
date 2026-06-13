@@ -36,7 +36,12 @@ PORT_LOGDIR="/var/log/portage"
 
 GENTOO_MIRRORS="https://distfiles.gentoo.org"
 
-USE="wayland vulkan opengl -X -gnome -kde -systemd elogind networkmanager pulseaudio"
+# alsa: builds PipeWire's libspa-alsa backend (the SPA plugin that opens the
+#   ICH9/HDA codec). Without it PipeWire has no hardware sink and every stream
+#   falls back to the dummy driver — i.e. silence.
+# dbus: builds libspa-dbus (device reservation) and clears the
+#   "can't load dbus library: support/libspa-dbus" warning.
+USE="wayland vulkan opengl -X -gnome -kde -systemd elogind networkmanager pulseaudio pipewire alsa dbus"
 
 VIDEO_CARDS="intel amdgpu radeonsi nouveau virtualbox vmware"
 INPUT_DEVICES="libinput"
@@ -122,6 +127,19 @@ YETI_PACKAGE_LIST = [
     "dev-libs/glib",                # GLib (used by various Wine subsystems)
     "media-libs/libglvnd",          # EGL/OpenGL dispatch
 
+    # Audio: PipeWire backend for the YetiOS audio stack (winepipewire.drv).
+    # Provides the libpipewire-0.3 pkg-config + headers that
+    # dlls/winepipewire.drv links against, plus the runtime daemon that
+    # mmdevapi's driver connects to. The `pipewire` USE flag (see make.conf)
+    # builds the PipeWire backends/shims on dependent packages.
+    "media-video/pipewire",
+
+    # ALSA userland: amixer/alsactl are used by the yetios-audio-init boot
+    # service to unmute the HDA codec (fresh ALSA state often comes up muted,
+    # which makes PipeWire output silence). Also ships aplay/speaker-test,
+    # handy for testing the card directly once a shell exists.
+    "media-sound/alsa-utils",
+
     # Seat management — required by wlroots compositors (frostedglass)
     # to acquire DRM/input device access via libseat.
     "sys-auth/seatd",
@@ -144,12 +162,24 @@ YETI_PACKAGE_LIST = [
     "media-libs/vulkan-loader",      # (already listed for runtime)
     "dev-libs/libxml2",              # Wine configure
     "media-libs/alsa-lib",           # audio backend
+    # media-libs/pipewire (listed above) supplies the headers Moonshine's
+    # configure probes for libpipewire-0.3 to build winepipewire.drv.
 
     # Snowfall build deps (headers for linking)
     # libdrm, libinput, cairo, pam, xkbcommon already listed as runtime deps
     # — their -dev headers are included by Gentoo's default USE flags.
 
     # Snowcone build deps — just needs DRM headers (linux-headers above)
+
+    # ---- Developer / debug ----
+    # foot: lightweight Wayland terminal, opened with Ctrl+T in frostedglass
+    # (see fg_input.c). Not an end-user Win32 surface — a dev affordance for
+    # running wpctl/amixer/aplay live instead of rebuilding the image per
+    # hypothesis. dejavu supplies a monospace font so foot has something to
+    # render with (foot's default "monospace" resolves to DejaVu Sans Mono
+    # via fontconfig); without any installed font foot won't start.
+    "x11-terms/foot",
+    "media-fonts/dejavu",
 ]
 
 # ---------------------------------------------------------------------------
@@ -326,4 +356,52 @@ start() {{
     rc-update del wine-firstboot default 2>/dev/null
     eend 0
 }}
+"""
+
+# ---------------------------------------------------------------------------
+# Boot-time ALSA mixer initialization.
+#
+# On a fresh ALSA state the HDA codec frequently comes up with Master/PCM
+# muted (or at zero). The PipeWire graph is then perfectly wired and frames
+# flow, but the codec emits nothing — i.e. silence with no errors anywhere.
+# This service brings the card to a sane, unmuted default BEFORE the
+# graphical session (and therefore PipeWire / Moonshine) starts. It runs on
+# every boot and persists the result. Safe no-op when no card is present.
+#
+# NOTE: plain shell braces here — this template is written verbatim (no
+# str.format()), unlike WINE_FIRSTBOOT_SERVICE, so braces are NOT doubled.
+# ---------------------------------------------------------------------------
+ALSA_UNMUTE_SERVICE = """\
+#!/sbin/openrc-run
+
+description="Initialize and unmute the ALSA mixer for PipeWire output"
+
+depend() {
+    need localmount
+}
+
+start() {
+    ebegin "Initializing ALSA mixer"
+
+    if [ ! -e /proc/asound/card0 ]; then
+        einfo "No ALSA card present; skipping."
+        eend 0
+        return 0
+    fi
+
+    # Bring the codec to its default (unmuted) state per the card's profile.
+    alsactl init 2>/dev/null
+
+    # Belt-and-suspenders: explicitly unmute and raise the controls the QEMU
+    # HDA codec commonly exposes. Missing controls are ignored.
+    for ctl in Master PCM Speaker Headphone Front; do
+        amixer -c 0 -q sset "$ctl" unmute 2>/dev/null
+        amixer -c 0 -q sset "$ctl" 100% 2>/dev/null
+    done
+
+    # Persist so the state survives reboots.
+    alsactl store 2>/dev/null
+
+    eend 0
+}
 """
