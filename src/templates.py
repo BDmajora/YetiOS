@@ -36,12 +36,22 @@ PORT_LOGDIR="/var/log/portage"
 
 GENTOO_MIRRORS="https://distfiles.gentoo.org"
 
-# alsa: builds PipeWire's libspa-alsa backend (the SPA plugin that opens the
-#   ICH9/HDA codec). Without it PipeWire has no hardware sink and every stream
-#   falls back to the dummy driver — i.e. silence.
-# dbus: builds libspa-dbus (device reservation) and clears the
-#   "can't load dbus library: support/libspa-dbus" warning.
-USE="wayland vulkan opengl -X -gnome -kde -systemd elogind networkmanager pulseaudio pipewire alsa dbus"
+# PipeWire audio-server USE flags:
+#   sound-server : THE critical one. Makes PipeWire act as the system audio
+#                  server so WirePlumber enumerates the HDA card into a real
+#                  sink. With it OFF, PipeWire runs but creates ZERO audio
+#                  devices — the long-hunted "no sink, total silence" bug
+#                  (the ebuild even warns: "USE=sound-server is disabled!").
+#   pulseaudio   : builds the pipewire-pulse daemon (PulseAudio-API shim) so
+#                  pulse clients like Flatpak Firefox (cubeb) can play. NB:
+#                  the daemon still has to be launched at session start —
+#                  fg_audio.c spawns it alongside pipewire/wireplumber.
+#   alsa         : pipewire-alsa (libasound plugin) so native ALSA apps route
+#                  through PipeWire. Not required for output — the SPA alsa
+#                  hardware backend is built regardless.
+#   dbus         : libspa-dbus (device reservation; clears the libspa-dbus
+#                  load warning; lets module-rt reach rtkit if installed).
+USE="wayland vulkan opengl -X -gnome -kde -systemd elogind networkmanager pulseaudio pipewire alsa dbus sound-server"
 
 VIDEO_CARDS="intel amdgpu radeonsi nouveau virtualbox vmware"
 INPUT_DEVICES="libinput"
@@ -144,6 +154,18 @@ YETI_PACKAGE_LIST = [
     # to acquire DRM/input device access via libseat.
     "sys-auth/seatd",
 
+    # Realtime scheduling for the audio graph. rtkit is a D-Bus-activated
+    # system service that grants RT priority to PipeWire's threads (via
+    # polkit authorization of the active local session) without needing
+    # per-user rlimits. This is what clears the "RTKit ... ServiceUnknown"
+    # warnings and gives glitch-resistant audio under load. polkit comes in
+    # as an rtkit dependency; listed explicitly for clarity. Both build
+    # against elogind, NOT systemd, because of the global -systemd USE flag.
+    # rtkit is D-Bus-activated, so it needs the system bus running — stage 06
+    # enables the dbus service for that.
+    "sys-auth/rtkit",
+    "sys-auth/polkit",
+
     # ---- Build toolchain (for in-chroot compilation of stages 7+) ----
     # Moonshine, snowcone, snowfall, and frostedglass are all built inside
     # the chroot against the target's libraries to avoid ABI mismatches.
@@ -178,8 +200,30 @@ YETI_PACKAGE_LIST = [
     # hypothesis. dejavu supplies a monospace font so foot has something to
     # render with (foot's default "monospace" resolves to DejaVu Sans Mono
     # via fontconfig); without any installed font foot won't start.
-    "x11-terms/foot",
+    "gui-apps/foot",
     "media-fonts/dejavu",
+
+    # Flatpak — runs sandboxed Linux GUI apps (e.g. a browser) independent of
+    # the host's library versions. This sits outside the Win32-only surface
+    # model, so it's a dev/testing convenience, not a product feature. The
+    # Flathub remote is registered in stage 06.
+    #
+    # xdg-desktop-portal is the portal *framework*. A portal *backend* is
+    # deliberately NOT pulled here: the one that implements Settings/FileChooser
+    # is sys-apps/xdg-desktop-portal-gtk, which drags in GTK3 — the exact stack
+    # going Flatpak let you avoid. Without a backend, flatpak apps still run;
+    # they just log the non-fatal "portal.Settings UnknownMethod" warning you
+    # already saw and use their own file dialogs. If you later want those
+    # portals, add sys-apps/xdg-desktop-portal-gtk (Settings/FileChooser, pulls
+    # GTK3) or gui-libs/xdg-desktop-portal-wlr (screencast only; needs
+    # compositor protocol support).
+    #
+    # NB: Flatpak's bwrap sandbox needs unprivileged user namespaces enabled in
+    # the kernel. The "CanCreateUserNamespace() clone() failure: EPERM" you saw
+    # is a kernel-config/sysctl matter (CONFIG_USER_NS + unprivileged userns),
+    # not something a package here can fix — see the note in stage 06.
+    "sys-apps/flatpak",
+    "sys-apps/xdg-desktop-portal",
 ]
 
 # ---------------------------------------------------------------------------

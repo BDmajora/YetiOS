@@ -15,6 +15,7 @@ from .common import (
     warn,
 )
 from .templates import (
+    ALSA_UNMUTE_SERVICE,
     LIBRELDR_REGISTER_SERVICE,
     WINE_FIRSTBOOT_SERVICE,
     YETI_PACKAGE_LIST,
@@ -194,6 +195,63 @@ def _install_wine_firstboot(cfg: Config) -> None:
     ok("wine-firstboot service installed and enabled")
 
 
+def _install_alsa_init(cfg: Config) -> None:
+    """Install a boot service that unmutes the ALSA mixer.
+
+    A fresh ALSA state on the QEMU HDA codec usually comes up with Master/PCM
+    muted, which makes PipeWire output silence even though its graph is fully
+    wired. This unmutes and raises the card before the graphical session
+    (and thus PipeWire/Moonshine) starts.
+    """
+
+    info("Installing ALSA mixer-init service ...")
+
+    svc_path = cfg.mount / "etc/init.d/yetios-audio-init"
+
+    svc_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Written verbatim — the template uses plain shell braces, no .format().
+    svc_path.write_text(ALSA_UNMUTE_SERVICE)
+    svc_path.chmod(0o755)
+
+    in_chroot(cfg, "rc-update add yetios-audio-init default")
+
+    ok("yetios-audio-init service installed and enabled")
+
+
+def _setup_flatpak(cfg: Config) -> None:
+    """Register the Flathub remote so flatpak can install apps.
+
+    sys-apps/flatpak itself is in YETI_PACKAGE_LIST (installed by the userland
+    emerge above); this only adds the remote. `remote-add` fetches the
+    .flatpakrepo (GPG key + repo config) over the network, so it needs the
+    build host online. Non-fatal: if it can't reach Flathub at build time, the
+    remote can be added at runtime with the identical command.
+
+    NB: Flatpak's bwrap sandbox needs unprivileged user namespaces in the guest
+    kernel. If apps fail with "CanCreateUserNamespace() clone() failure: EPERM",
+    that's a kernel-config matter (CONFIG_USER_NS + unprivileged userns must be
+    enabled), or use a setuid bubblewrap — neither is fixable from this stage.
+    """
+
+    info("Registering Flathub remote ...")
+
+    cp = in_chroot(
+        cfg,
+        "flatpak remote-add --if-not-exists flathub "
+        "https://dl.flathub.org/repo/flathub.flatpakrepo",
+        check=False,
+    )
+
+    if cp.returncode != 0:
+        warn("Could not register Flathub remote at build time (no network?).")
+        warn("Add it later at runtime with:")
+        warn("  flatpak remote-add --if-not-exists flathub "
+             "https://dl.flathub.org/repo/flathub.flatpakrepo")
+    else:
+        ok("Flathub remote registered")
+
+
 def run_stage(cfg: Config) -> None:
     step_banner("Stage 6 — Install Base Packages")
 
@@ -348,6 +406,23 @@ def run_stage(cfg: Config) -> None:
 
         # Wine firstboot initializer
         _install_wine_firstboot(cfg)
+
+        # ALSA mixer unmute on boot (fixes default-muted HDA codec → silence)
+        _install_alsa_init(cfg)
+
+        # Enable the system D-Bus bus at boot. rtkit and polkit are
+        # D-Bus-activated on the *system* bus, so PipeWire's module-rt can
+        # only reach RealtimeKit1 — and thus silence the RTKit warnings and
+        # get RT scheduling — when this is running. This is separate from the
+        # per-session bus that dbus-run-session gives WirePlumber; the two
+        # coexist. Idempotent if a dependency already pulled dbus into a
+        # runlevel.
+        info("Enabling system D-Bus service for rtkit/polkit ...")
+        in_chroot(cfg, "rc-update add dbus default")
+        ok("system D-Bus enabled at boot")
+
+        # Register the Flathub remote (flatpak package is in YETI_PACKAGE_LIST)
+        _setup_flatpak(cfg)
 
         # Verify user creation
         if cfg.yeti_user not in (
