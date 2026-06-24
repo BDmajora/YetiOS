@@ -1,6 +1,6 @@
 """Stage 10 — CrystallineLattice compositor installation (chroot build).
 
-CrystallineLattice (binary: `glacier-phase0`) is a from-scratch DRM/KMS
+CrystallineLattice (binary: `glacier`) is a from-scratch DRM/KMS
 platform layer purpose-built for YetiOS. Unlike the old frostedglass
 compositor it does NOT use wlroots or Wayland — it talks to libdrm/GBM/EGL/
 GLES directly and acquires devices through seatd (libseat).
@@ -36,8 +36,8 @@ from .core import (
 CRYSTALLINELATTICE_REPO   = "https://github.com/BDmajora/CrystallineLattice.git"
 CRYSTALLINELATTICE_BRANCH = "main"
 
-# Installed binary name (meson `executable('glacier-phase0', ...)`).
-CL_BINARY = "glacier-phase0"
+# Installed binary name (meson `executable('glacier', ...)`).
+CL_BINARY = "glacier"
 
 # pkg-config modules that must exist inside the chroot before building.
 # These map 1:1 to the dependency() calls in CrystallineLattice's meson.build.
