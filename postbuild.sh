@@ -79,11 +79,32 @@ chown -R "$YETI_USER:$YETI_USER" "/home/$YETI_USER/.cache"
 echo "[yeti] tty1 is owned by snowfall — leaving inittab default"
 
 echo "[yeti] enabling OpenRC services"
-# udev (eudev) lives in sysinit; the rest in boot/default. Idempotent.
-rc-update add udev sysinit 2>/dev/null || true
-rc-update add elogind boot 2>/dev/null || true
-rc-update add seatd boot 2>/dev/null || true
-rc-update add dbus default 2>/dev/null || true
-rc-update add dhcpcd default 2>/dev/null || true
+# udev (eudev) lives in sysinit; the rest in boot/default.
+rc-update add udev sysinit || true
+rc-update add elogind boot || true
+rc-update add dbus default || true
+rc-update add dhcpcd default || true
+
+# seatd is REQUIRED: the CrystallineLattice compositor (glacier) acquires DRM
+# master and input device fds through it (libseat). Without it the graphical
+# session can't start and snowfall just loops back to the greeter. Warn LOUDLY
+# if the service is missing rather than shipping a non-booting desktop.
+if [ -f /etc/init.d/seatd ]; then
+    rc-update add seatd boot
+else
+    echo "[yeti] WARNING: /etc/init.d/seatd missing — install seatd-openrc!" >&2
+fi
+
+# Text consoles. Artix's openrc-init has no /etc/inittab; gettys are per-tty
+# agetty-openrc services. snowfall owns tty1, so give logins on tty2-tty6
+# (Ctrl+Alt+F2..F6) — also the only way to reach a shell if the GUI fails.
+if [ -f /etc/init.d/agetty ]; then
+    for n in 2 3 4 5 6; do
+        ln -sf agetty /etc/init.d/agetty.tty$n
+        rc-update add agetty.tty$n default
+    done
+else
+    echo "[yeti] WARNING: agetty-openrc missing — no text consoles / VT switch!" >&2
+fi
 
 echo "[yeti] done"

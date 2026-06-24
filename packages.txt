@@ -17,7 +17,8 @@ linux-firmware
 mkinitcpio                  # initramfs generator (pacman hook builds initramfs-linux.img)
 
 # ---- Init / userland base ----
-openrc                      # also pulled by the bootstrap, listed for clarity
+openrc                      # also pulled by the bootstrap; provides /etc/init.d/agetty
+                            # (the getty service — no separate agetty package on Artix)
 elogind                     # systemd-logind replacement (seat/session for polkit/seatd)
 elogind-openrc
 bash
