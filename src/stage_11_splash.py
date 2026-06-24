@@ -27,7 +27,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from .common import (
+from .core import (
     Config,
     chroot_mount,
     chroot_umount,
@@ -135,7 +135,7 @@ def _build_and_install_in_chroot(cfg: Config, host_src: Path, integration) -> No
             cp = in_chroot(cfg, f"command -v {tool}", check=False)
             if cp.returncode != 0:
                 err(f"Missing build tool in chroot: {tool}")
-                err("Ensure build toolchain packages are in YETI_PACKAGE_LIST.")
+                err("Ensure build toolchain packages are in packages.txt.")
                 sys.exit(1)
 
         # Verify DRM headers exist (snowcone's only real build dep)

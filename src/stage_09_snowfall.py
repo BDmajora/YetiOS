@@ -13,7 +13,7 @@ The DRM master handoff chain is:
   libreldr -> snowcone (boot splash, grabs DRM master)
            -> snowfall (login manager, takes DRM master,
                        which causes snowcone to detect the loss and exit)
-           -> user's Wayland compositor (sway, frostedglass, etc.)
+           -> user's compositor (CrystallineLattice, sway, etc.)
 
 The OpenRC service file in the snowfall repo declares `after snowcone`,
 so the runlevel-order side of the handoff is handled without extra work.
@@ -27,7 +27,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from .common import (
+from .core import (
     Config,
     chroot_mount,
     chroot_umount,
@@ -119,7 +119,7 @@ def _build_and_install_in_chroot(cfg: Config, host_src: Path, integration) -> No
             cp = in_chroot(cfg, f"command -v {tool}", check=False)
             if cp.returncode != 0:
                 err(f"Missing build tool in chroot: {tool}")
-                err("Ensure build toolchain packages are in YETI_PACKAGE_LIST.")
+                err("Ensure build toolchain packages are in packages.txt.")
                 sys.exit(1)
 
         # Verify build deps
@@ -143,7 +143,7 @@ def _build_and_install_in_chroot(cfg: Config, host_src: Path, integration) -> No
         )
         if cp.returncode != 0:
             err("PAM development headers not found in chroot.")
-            err("Ensure sys-libs/pam is in YETI_PACKAGE_LIST.")
+            err("Ensure pam is in packages.txt.")
             sys.exit(1)
 
         # Build
@@ -205,7 +205,7 @@ def _build_and_install_in_chroot(cfg: Config, host_src: Path, integration) -> No
 def _ensure_sessions_dir(cfg: Config) -> None:
     """Make sure /usr/share/wayland-sessions/ exists.
 
-    Compositors installed via emerge (sway, labwc, etc.) will drop their
+    Compositors installed via pacman (sway, labwc, etc.) will drop their
     .desktop files here. Snowfall reads from this directory to populate
     the session picker, so the directory must exist even if empty.
     """
@@ -248,7 +248,7 @@ def _runtime_deps_present(cfg: Config) -> None:
         warn("snowfall runtime libraries not yet present in rootfs:")
         for m in missing:
             warn(f"  {m}")
-        warn("Add the providing packages to YETI_PACKAGE_LIST in "
+        warn("Add the providing packages to packages.txt in "
              "src/templates.py and re-run stage 06.")
 
 

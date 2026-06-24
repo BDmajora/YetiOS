@@ -11,10 +11,10 @@ produces binaries linked against the host's library versions, which may
 differ from the target rootfs.  This causes anything from subtle ABI
 mismatches to outright "symbol not found" crashes at runtime.  Building
 inside the chroot guarantees the binary matches the target, just like
-frostedglass (stage 10).
+CrystallineLattice (stage 10).
 
 The trade-off is that the chroot needs a C toolchain and dev headers
-installed — stage 06 handles this via YETI_PACKAGE_LIST.
+installed — stage 06 handles this via packages.txt.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from .common import (
+from .core import (
     Config,
     chroot_mount,
     chroot_umount,
@@ -51,6 +51,18 @@ CHROOT_BUILD_PKGS = [
     "freetype2",
     "vulkan",
 ]
+
+
+# Wine Mono MSI — Moonshine (a Wine fork) looks for the Mono installer in
+# /usr/share/wine/mono/ before trying to download it. Staging it here lets the
+# Wine prefix initialize offline (no "Install Mono" dialog blocking the first
+# session). Moved here from the old frostedglass stage since it's a Wine/
+# Moonshine concern, not a compositor one.
+WINE_MONO_VERSION = "9.4.0"
+WINE_MONO_URL = (
+    f"https://dl.winehq.org/wine/wine-mono/{WINE_MONO_VERSION}/"
+    f"wine-mono-{WINE_MONO_VERSION}-x86.msi"
+)
 
 
 def _clone_source(cfg: Config) -> Path:
@@ -94,7 +106,7 @@ def _build_in_chroot(cfg: Config, host_src: Path) -> None:
             cp = in_chroot(cfg, f"command -v {tool}", check=False)
             if cp.returncode != 0:
                 err(f"Missing build tool in chroot: {tool}")
-                err("Ensure build toolchain packages are in YETI_PACKAGE_LIST.")
+                err("Ensure build toolchain packages are in packages.txt.")
                 sys.exit(1)
 
         # Verify key dev libraries are present
@@ -107,7 +119,7 @@ def _build_in_chroot(cfg: Config, host_src: Path) -> None:
         if missing_pc:
             warn(f"Missing pkg-config modules in chroot: {', '.join(missing_pc)}")
             warn("Moonshine may configure without some optional features.")
-            warn("Add the providing packages to YETI_PACKAGE_LIST if needed.")
+            warn("Add the providing packages to packages.txt if needed.")
 
         # Configure — enable 64-bit Wine with Wayland support
         info("Configuring Moonshine inside chroot ...")
@@ -138,10 +150,45 @@ def _build_in_chroot(cfg: Config, host_src: Path) -> None:
             shutil.rmtree(chroot_src)
 
 
+def _install_wine_mono(cfg: Config) -> None:
+    """Pre-stage the Wine Mono MSI into the shared Wine cache.
+
+    Moonshine looks for Mono MSIs in /usr/share/wine/mono/ before trying to
+    download them. Pre-installing avoids the "Install Mono" dialog and the
+    need for network access when the Wine prefix is first initialized.
+    Non-fatal: if the download fails, Mono is fetched on first boot instead.
+    """
+    mono_cache = cfg.mount / "usr/share/wine/mono"
+    mono_msi = mono_cache / f"wine-mono-{WINE_MONO_VERSION}-x86.msi"
+
+    if mono_msi.exists():
+        info("Wine Mono MSI already staged, skipping download")
+        return
+
+    mono_cache.mkdir(parents=True, exist_ok=True)
+
+    info(f"Downloading Wine Mono {WINE_MONO_VERSION} ...")
+    dl_path = cfg.build_dir / f"wine-mono-{WINE_MONO_VERSION}-x86.msi"
+
+    if not dl_path.exists():
+        cp = run(["wget", "-q", "--show-progress", "-O", str(dl_path),
+                  WINE_MONO_URL], check=False)
+        if cp.returncode != 0:
+            warn(f"Failed to download Wine Mono from {WINE_MONO_URL}")
+            warn("Wine will download Mono on first boot instead (needs network).")
+            dl_path.unlink(missing_ok=True)
+            return
+
+    shutil.copy2(dl_path, mono_msi)
+    mono_msi.chmod(0o644)
+    ok(f"Wine Mono {WINE_MONO_VERSION} staged to /usr/share/wine/mono/")
+
+
 def run_stage(cfg: Config) -> None:
     step_banner("Stage 7 — Install Moonshine (chroot build)")
 
     repo_dir = _clone_source(cfg)
     _build_in_chroot(cfg, repo_dir)
+    _install_wine_mono(cfg)
 
     ok("Moonshine installed successfully into rootfs")

@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from .common import (
+from .core import (
     Config,
     err,
     info,

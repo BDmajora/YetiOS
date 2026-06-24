@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 
-from .common import (
+from .core import (
     Config,
     losetup_attach,
     loop_for,

@@ -1,10 +1,10 @@
 # YetiOS
 
-A minimal Linux distribution built on a Gentoo stage3 base with OpenRC, a custom user session, and a fully automated build pipeline.
+A minimal Linux distribution built on an Artix Linux (OpenRC) base, a custom user session, and a fully automated build pipeline.
 
 ## Vision
 
-YetiOS is a lightweight, from-scratch Linux distribution that boots into a clean, minimal environment. Built on Gentoo's stage3 tarball with binary package support (binpkgs), it assembles a working system in under an hour on modern hardware — no compilation marathon required.
+YetiOS is a lightweight, from-scratch Linux distribution that boots into a clean, minimal environment. Built on Artix Linux (Arch-based, OpenRC, systemd-free) with pacman binary packages, it assembles a working system in under an hour on modern hardware — no compilation marathon required.
 
 Future versions will include:
 - **Wayland desktop session** — labwc compositor with a minimal launcher
@@ -16,23 +16,28 @@ Future versions will include:
 
 ```
 run.py                         # Build orchestrator entry point
-postbuild.sh                   # Post-install user/hostname/service configuration
+packages.txt                   # Runtime package list (pacman names, one per line)
+postbuild.sh                   # Post-install user/hostname/locale/service configuration
 yetios-vm.xml                  # libvirt VM definition template
 test.py                        # Register and start the image in virt-manager
 src/
-  common.py                    # Shared utilities, Config, BuildState, chroot helpers
-  templates.py                 # Portage config, package list, fstab, extlinux templates
+  core.py                      # Shared toolkit: Config, BuildState, chroot/loop helpers
+  rootfs.py                    # pacman.conf, mirror lists, fstab, OpenRC service templates
   stage_01_host_check.py       # Verify tools, platform, disk space
   stage_02_image.py            # Create sparse image, partition, format, mount
-  stage_03_fetch.py            # Download and verify Gentoo stage3 tarball
-  stage_04_extract.py          # Extract stage3 into mounted image
-  stage_05_portage_setup.py    # make.conf, binhost, portage sync, profile
-  stage_06_install_packages.py # emerge packages + post-install configuration
-  stage_07_bootloader.py       # extlinux + MBR boot stub
-  stage_08_unmount.py          # Clean unmount, detach loop device
+  stage_03_fetch.py            # Download the Artix bootstrap script
+  stage_04_extract.py          # Bootstrap a minimal Artix base into the image
+  stage_05_pacman_setup.py     # pacman.conf, mirror lists, keyrings, sync
+  stage_06_install_packages.py # pacman -S packages.txt + post-install configuration
+  stage_07_moonshine.py        # Build/install Moonshine (Wine fork) in chroot
+  stage_08_bootloader.py       # libreldr UEFI install + kernel/initramfs to ESP
+  stage_09_snowfall.py         # Build/install snowfall login manager
+  stage_10_crystallinelattice.py # Build/install CrystallineLattice compositor
+  stage_11_splash.py           # Build/install snowcone boot splash
+  stage_12_unmount.py          # Clean unmount, detach loop device
 build/                         # Created during build
   yetios.img                   # Final bootable disk image
-  stage3-cache/                # Cached stage3 tarball
+  bootstrap-cache/             # Cached artix-bootstrap.sh + downloaded base packages
   .yeti-state/                 # Stage completion markers for resumable builds
 ```
 
@@ -43,11 +48,12 @@ build/                         # Created during build
 - Linux host (x86_64)
 - Root access (loop devices and chroot require it)
 - ~25 GB free disk space
-- Standard tools: `parted`, `extlinux`, `qemu-img`, `wget`, `tar`, `xz`
+- Standard tools: `parted`, `qemu-img`, `wget`, `curl`, `tar`, `xz`, `zstd`, `gawk`
 
 On Debian/Ubuntu/Mint:
 ```bash
-sudo apt install parted util-linux extlinux qemu-utils wget tar xz-utils
+sudo apt install parted util-linux dosfstools qemu-utils wget curl \
+                 tar xz-utils zstd gawk git build-essential gnu-efi
 ```
 
 ### Building YetiOS
@@ -77,10 +83,10 @@ sudo ./run.py --only 06_install_packages
 | 1     | host_check         | seconds  | Verify tools, disk space, and permissions   |
 | 2     | image_create       | seconds  | Create sparse 20 GB raw image               |
 | 2     | image_mount        | seconds  | Partition, format ext2/ext4, loop-mount     |
-| 3     | fetch              | ~1 min   | Download and verify Gentoo stage3 tarball   |
-| 4     | extract            | ~1 min   | Extract stage3 into the mounted image       |
-| 5     | portage_setup      | ~5 min   | Configure Portage, sync package tree        |
-| 6     | install_packages   | ~30 min  | emerge binpkgs + post-install configuration |
+| 3     | fetch              | seconds  | Download the Artix bootstrap script         |
+| 4     | extract            | ~5 min   | Bootstrap a minimal Artix base into the image |
+| 5     | pacman_setup       | ~3 min   | Configure pacman repos + keyrings, sync     |
+| 6     | install_packages   | ~15 min  | pacman -S the userland + post-install config |
 | 7     | bootloader         | seconds  | Install extlinux + MBR boot stub            |
 | 8     | unmount            | seconds  | Detach loop device, print boot command      |
 
@@ -112,21 +118,29 @@ virsh -c qemu:///system start yetios
 --yeti-user NAME    Default user inside YetiOS (default: yeti)
 --hostname NAME     System hostname (default: yetios)
 --tz TZ             Timezone (default: UTC)
---jobs N            Parallel emerge jobs (default: nproc)
---mirror URL        Gentoo distfiles mirror (default: https://distfiles.gentoo.org/)
---variant STR       Stage3 variant (default: amd64-openrc)
+--jobs N            Parallel build jobs (default: nproc)
+--artix-mirror URL  Artix repo mirror (default: https://mirror1.artixlinux.org/repos)
+--arch-mirror URL   Arch repo mirror  (default: https://geo.mirror.pkgbuild.com)
+--init NAME         Artix init system: openrc|runit|s6|dinit (default: openrc)
 --restart           Wipe stage markers and start over
 --only STAGE        Run a single stage and exit
 ```
+
+## Packages
+
+The runtime package set lives in [`packages.txt`](packages.txt) at the repo root —
+one pacman package per line, `#` for comments. Add or remove packages there;
+stage 6 installs them with `pacman -S --needed`. Names are Artix/Arch package
+names (e.g. `pipewire`, `mesa`, `vulkan-icd-loader`).
 
 ## Updating the System
 
 From inside YetiOS:
 
 ```bash
-sudo emerge --sync
-sudo emerge --update --deep --newuse @world
-sudo emerge --depclean
+sudo pacman -Syu          # refresh repos and upgrade everything
+sudo pacman -S <package>  # install a package
+sudo pacman -Rns <package> # remove a package and its unused deps
 ```
 
 ## Current Limitations (v0)
@@ -175,8 +189,8 @@ YetiOS is built from open-source components and provided as-is. See individual p
 
 ## References
 
-- [Gentoo Linux](https://www.gentoo.org/)
-- [Gentoo Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64)
-- [Portage Package Manager](https://wiki.gentoo.org/wiki/Portage)
-- [extlinux / Syslinux](https://wiki.syslinux.org/)
+- [Artix Linux](https://artixlinux.org/)
+- [Artix Wiki](https://wiki.artixlinux.org/)
+- [artix-bootstrap](https://gitea.artixlinux.org/artix/artix-bootstrap)
+- [Arch Wiki: pacman](https://wiki.archlinux.org/title/Pacman)
 - [libvirt / virt-manager](https://virt-manager.org/)

@@ -1,9 +1,9 @@
-"""Stage 6 — install packages via emerge with explicit multi-threading."""
+"""Stage 6 — install the YetiOS userland via pacman + post-install config."""
 
 from __future__ import annotations
 from pathlib import Path
 
-from .common import (
+from .core import (
     Config,
     chroot_mount,
     chroot_umount,
@@ -11,28 +11,21 @@ from .common import (
     info,
     ok,
     err,
+    read_package_list,
     step_banner,
     warn,
 )
-from .templates import (
+from .rootfs import (
     ALSA_UNMUTE_SERVICE,
     LIBRELDR_REGISTER_SERVICE,
     WINE_FIRSTBOOT_SERVICE,
-    YETI_PACKAGE_LIST,
 )
-
-# ---------------------------------------------------------------------------
-# wlr-randr — not in the main Gentoo repo, built from source.
-# desk.cpl uses it at runtime for resolution / refresh / VRR control.
-# ---------------------------------------------------------------------------
-WLR_RANDR_VERSION = "0.5.0"
-WLR_RANDR_REPO = "https://gitlab.freedesktop.org/emersion/wlr-randr.git"
 
 # ---------------------------------------------------------------------------
 # System sound generator.
 #
-# Installed to /usr/lib/yetios/gen-media.py. frostedglass runs it during
-# first-boot prefix initialization, writing the system event sounds DIRECTLY
+# Installed to /usr/lib/yetios/gen-media.py, to be run during first-boot
+# Wine-prefix initialization, writing the system event sounds DIRECTLY
 # into the NT file structure (C:\windows\Media) — the canonical, themeable
 # location. No audio assets are stored in the Linux tree; replace the .wav
 # files in C:\windows\Media to retheme.
@@ -130,43 +123,31 @@ if __name__ == "__main__":
 '''
 
 
-def _build_wlr_randr(cfg: Config) -> None:
-    """Download and build wlr-randr from source inside the chroot."""
+def _install_packages(cfg: Config) -> int:
+    """Install everything in packages.txt with pacman. Returns the count."""
+    pkgs = read_package_list(cfg.packages_file)
+    if not pkgs:
+        err(f"No packages found in {cfg.packages_file}.")
+        raise RuntimeError("empty package list")
 
-    info(f"Building wlr-randr {WLR_RANDR_VERSION} from source ...")
-
-    build_script = f"""\
-set -e
-cd /tmp
-
-git clone --branch v{WLR_RANDR_VERSION} --depth 1 '{WLR_RANDR_REPO}' wlr-randr
-cd wlr-randr
-
-meson setup build --prefix=/usr --buildtype=release
-ninja -C build
-
-ninja -C build install
-
-cd /tmp
-rm -rf wlr-randr
-"""
-
-    in_chroot(cfg, build_script)
-
-    ok(f"wlr-randr {WLR_RANDR_VERSION} installed to /usr/bin/wlr-randr")
+    info(f"Installing {len(pkgs)} packages with pacman ...")
+    # --needed skips up-to-date packages; base-devel is a group and expands
+    # to all its members non-interactively under --noconfirm.
+    in_chroot(
+        cfg,
+        "pacman -S --needed --noconfirm " + " ".join(pkgs),
+    )
+    ok(f"installed {len(pkgs)} package atoms")
+    return len(pkgs)
 
 
 def _install_media_generator(cfg: Config) -> None:
     """Install the system-sound generator script."""
-
     info("Installing system-sound generator ...")
-
     gen_path = cfg.mount / "usr/lib/yetios/gen-media.py"
-
     gen_path.parent.mkdir(parents=True, exist_ok=True)
     gen_path.write_text(GEN_MEDIA_PY)
     gen_path.chmod(0o755)
-
     ok("gen-media.py installed to /usr/lib/yetios/")
 
 
@@ -176,22 +157,12 @@ def _install_wine_firstboot(cfg: Config) -> None:
     Ensures Wine Mono/Gecko are downloaded while networking is available,
     and applies registry prefs to a fresh prefix.
     """
-
     info("Installing wine-firstboot service ...")
-
     svc_path = cfg.mount / "etc/init.d/wine-firstboot"
-
     svc_path.parent.mkdir(parents=True, exist_ok=True)
-
-    service_text = WINE_FIRSTBOOT_SERVICE.format(
-        yeti_user=cfg.yeti_user
-    )
-
-    svc_path.write_text(service_text)
+    svc_path.write_text(WINE_FIRSTBOOT_SERVICE.format(yeti_user=cfg.yeti_user))
     svc_path.chmod(0o755)
-
     in_chroot(cfg, "rc-update add wine-firstboot default")
-
     ok("wine-firstboot service installed and enabled")
 
 
@@ -203,46 +174,47 @@ def _install_alsa_init(cfg: Config) -> None:
     wired. This unmutes and raises the card before the graphical session
     (and thus PipeWire/Moonshine) starts.
     """
-
     info("Installing ALSA mixer-init service ...")
-
     svc_path = cfg.mount / "etc/init.d/yetios-audio-init"
-
     svc_path.parent.mkdir(parents=True, exist_ok=True)
-
     # Written verbatim — the template uses plain shell braces, no .format().
     svc_path.write_text(ALSA_UNMUTE_SERVICE)
     svc_path.chmod(0o755)
-
     in_chroot(cfg, "rc-update add yetios-audio-init default")
-
     ok("yetios-audio-init service installed and enabled")
+
+
+def _install_libreldr_register(cfg: Config) -> None:
+    """Install the first-boot service that registers libreldr in UEFI NVRAM."""
+    info("Installing libreldr-register first-boot service ...")
+    svc_path = cfg.mount / "etc/init.d/libreldr-register"
+    svc_path.parent.mkdir(parents=True, exist_ok=True)
+    svc_path.write_text(LIBRELDR_REGISTER_SERVICE)
+    svc_path.chmod(0o755)
+    in_chroot(cfg, "rc-update add libreldr-register default")
+    ok("libreldr-register service installed and enabled")
 
 
 def _setup_flatpak(cfg: Config) -> None:
     """Register the Flathub remote so flatpak can install apps.
 
-    sys-apps/flatpak itself is in YETI_PACKAGE_LIST (installed by the userland
-    emerge above); this only adds the remote. `remote-add` fetches the
-    .flatpakrepo (GPG key + repo config) over the network, so it needs the
-    build host online. Non-fatal: if it can't reach Flathub at build time, the
-    remote can be added at runtime with the identical command.
+    sys-apps/flatpak is in packages.txt; this only adds the remote. `remote-add`
+    fetches the .flatpakrepo (GPG key + repo config) over the network, so it
+    needs the build host online. Non-fatal: if it can't reach Flathub at build
+    time, the remote can be added at runtime with the identical command.
 
     NB: Flatpak's bwrap sandbox needs unprivileged user namespaces in the guest
     kernel. If apps fail with "CanCreateUserNamespace() clone() failure: EPERM",
     that's a kernel-config matter (CONFIG_USER_NS + unprivileged userns must be
     enabled), or use a setuid bubblewrap — neither is fixable from this stage.
     """
-
     info("Registering Flathub remote ...")
-
     cp = in_chroot(
         cfg,
         "flatpak remote-add --if-not-exists flathub "
         "https://dl.flathub.org/repo/flathub.flatpakrepo",
         check=False,
     )
-
     if cp.returncode != 0:
         warn("Could not register Flathub remote at build time (no network?).")
         warn("Add it later at runtime with:")
@@ -256,131 +228,18 @@ def run_stage(cfg: Config) -> None:
     step_banner("Stage 6 — Install Base Packages")
 
     chroot_mount(cfg)
-
     try:
-        # Ensure /dev/shm exists
-        in_chroot(
-            cfg,
-            "mkdir -p /dev/shm && "
-            "mount -t tmpfs tmpfs /dev/shm -o mode=1777"
-        )
+        # 1. Install the userland from packages.txt. Installing `linux` here
+        #    triggers pacman's mkinitcpio hook, which writes
+        #    /boot/vmlinuz-linux + /boot/initramfs-linux.img onto the ESP.
+        count = _install_packages(cfg)
 
-        # Kernel/dracut bootstrap marker
-        in_chroot(
-            cfg,
-            "mkdir -p /etc/kernel/preinst.d && "
-            "touch /etc/kernel/preinst.d/05-check-chroot.install && "
-            "echo 'root=LABEL=yetios-root ro quiet' > /etc/kernel/cmdline",
-        )
-
-        # Pre-accept licenses
-        in_chroot(
-            cfg,
-            "mkdir -p /etc/portage/package.license && "
-            "echo 'sys-kernel/linux-firmware @BINARY-REDISTRIBUTABLE' "
-            "> /etc/portage/package.license/firmware && "
-            "echo 'sys-kernel/gentoo-kernel-bin linux-fw-redistributable' "
-            ">> /etc/portage/package.license/firmware",
-        )
-
-        # USE flags
-        in_chroot(
-            cfg,
-            "mkdir -p /etc/portage/package.use && "
-            "echo 'sys-kernel/installkernel dracut' "
-            "> /etc/portage/package.use/installkernel && "
-            "echo 'sys-auth/seatd server' "
-            "> /etc/portage/package.use/seatd",
-        )
-
-        # Upgrade portage first
-        info("Upgrading portage before @world update...")
-
-        in_chroot(
-            cfg,
-            "emerge --oneshot --usepkg=n sys-apps/portage"
-        )
-
-        ok("portage upgraded")
-
-        # Commit to Python 3.14 only
-        info("Committing system to python3.14 only...")
-
-        in_chroot(
-            cfg,
-            "emerge --oneshot --usepkg=n "
-            "app-eselect/eselect-python "
-            "dev-lang/python:3.14 && "
-            "eselect python update && "
-            "eselect python set python3.14 && "
-            "sed -i "
-            "-e 's/^PYTHON_TARGETS=.*/PYTHON_TARGETS=\"python3_14\"/' "
-            "-e 's/^PYTHON_SINGLE_TARGET=.*/PYTHON_SINGLE_TARGET=\"python3_14\"/' "
-            "/etc/portage/make.conf",
-        )
-
-        ok("python3.14 is now the sole Python target")
-
-        parallel_flags = (
-            f"--jobs={cfg.jobs} "
-            f"--load-average={float(cfg.jobs) * 0.9}"
-        )
-
-        # Update @world
-        info(f"Updating base system using {cfg.jobs} parallel jobs...")
-
-        in_chroot(
-            cfg,
-            f"emerge --update --deep --newuse "
-            f"--with-bdeps=y {parallel_flags} @world",
-        )
-
-        # Install YetiOS userland
-        info(f"Installing YetiOS userland using {cfg.jobs} parallel jobs...")
-
-        in_chroot(
-            cfg,
-            f"emerge --noreplace {parallel_flags} "
-            f"{' '.join(YETI_PACKAGE_LIST)}",
-        )
-
-        # Reconcile Python targets
-        info("Reconciling Python targets...")
-
-        in_chroot(
-            cfg,
-            f"emerge --oneshot --getbinpkg=n --usepkg=n "
-            f"{parallel_flags} "
-            "dev-python/markupsafe "
-            "dev-python/jinja2",
-        )
-
-        # depclean
-        cp = in_chroot(
-            cfg,
-            "emerge --depclean --quiet",
-            check=False,
-        )
-
-        if cp.returncode != 0:
-            warn("depclean did not complete cleanly.")
-            warn("Build continues.")
-        else:
-            ok("orphaned packages removed")
-
-        # Build wlr-randr
-        _build_wlr_randr(cfg)
-
-        # Install media generator
+        # 2. System sound generator for the Wine prefix's C:\windows\Media.
         _install_media_generator(cfg)
 
-        # Post-install config
-        info("Running post-install configuration...")
-
-        postbuild_src = (
-            Path(__file__).resolve().parent.parent / "postbuild.sh"
-        ).read_text()
-
+        # 3. Post-install configuration (user, hostname, locale, services).
+        info("Running post-install configuration ...")
+        postbuild_src = cfg.postbuild_script.read_text()
         in_chroot(
             cfg,
             postbuild_src.format(
@@ -390,62 +249,21 @@ def run_stage(cfg: Config) -> None:
             ),
         )
 
-        # libreldr-register service
-        info("Installing libreldr-register first-boot service...")
-
-        svc_path = cfg.mount / "etc/init.d/libreldr-register"
-
-        svc_path.parent.mkdir(parents=True, exist_ok=True)
-
-        svc_path.write_text(LIBRELDR_REGISTER_SERVICE)
-        svc_path.chmod(0o755)
-
-        in_chroot(cfg, "rc-update add libreldr-register default")
-
-        ok("libreldr-register service installed and enabled")
-
-        # Wine firstboot initializer
+        # 4. YetiOS first-boot / boot services.
+        _install_libreldr_register(cfg)
         _install_wine_firstboot(cfg)
-
-        # ALSA mixer unmute on boot (fixes default-muted HDA codec → silence)
         _install_alsa_init(cfg)
 
-        # Enable the system D-Bus bus at boot. rtkit and polkit are
-        # D-Bus-activated on the *system* bus, so PipeWire's module-rt can
-        # only reach RealtimeKit1 — and thus silence the RTKit warnings and
-        # get RT scheduling — when this is running. This is separate from the
-        # per-session bus that dbus-run-session gives WirePlumber; the two
-        # coexist. Idempotent if a dependency already pulled dbus into a
-        # runlevel.
-        info("Enabling system D-Bus service for rtkit/polkit ...")
-        in_chroot(cfg, "rc-update add dbus default")
-        ok("system D-Bus enabled at boot")
-
-        # Register the Flathub remote (flatpak package is in YETI_PACKAGE_LIST)
+        # 5. Flathub remote (flatpak itself is in packages.txt).
         _setup_flatpak(cfg)
 
-        # Verify user creation
-        if cfg.yeti_user not in (
-            cfg.mount / "etc/passwd"
-        ).read_text():
-            err(
-                f"User '{cfg.yeti_user}' was NOT found "
-                "in /etc/passwd after postbuild!"
-            )
+        # 6. Sanity: the build is worthless if the user wasn't created.
+        if cfg.yeti_user not in (cfg.mount / "etc/passwd").read_text():
+            err(f"User '{cfg.yeti_user}' was NOT found in /etc/passwd after "
+                "postbuild!")
             raise RuntimeError("User creation failed")
-
         ok(f"User '{cfg.yeti_user}' verified in /etc/passwd.")
 
-        ok(
-            f"Installed {len(YETI_PACKAGE_LIST)} "
-            "core packages + wlr-randr."
-        )
-
+        ok(f"Installed {count} package atoms + configured services.")
     finally:
-        in_chroot(
-            cfg,
-            "umount /dev/shm 2>/dev/null || true",
-            check=False,
-        )
-
         chroot_umount(cfg)

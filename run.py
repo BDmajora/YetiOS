@@ -2,7 +2,7 @@
 """
 run.py — YetiOS build orchestrator entry point.
 
-YetiOS = Gentoo stage3 + custom user session.
+YetiOS = Artix (OpenRC) base + custom user session.
 
 Thin dispatcher: parses args, walks the resumable stage pipeline, and
 delegates to modules under src/. Each stage writes a marker on success,
@@ -12,15 +12,15 @@ Pipeline:
   1. host_check         — Verify Linux, root, tools, disk space, overlay
   2. image_create       — Create sparse .img and write partition table
   2. image_mount        — Loop-attach, format, mount root + /boot
-  3. fetch              — Download Gentoo stage3 tarball (cached)
-  4. extract            — Extract tarball into the mounted image
-  5. portage_setup      — make.conf + binhost + sync portage tree
-  6. install_packages   — emerge runtime packages (mostly binpkgs, ~30 min)
+  3. fetch              — Download artix-bootstrap.sh (cached)
+  4. extract            — Bootstrap a minimal Artix base into the image
+  5. pacman_setup       — pacman.conf + mirror lists + keyrings + sync
+  6. install_packages   — pacman -S the YetiOS userland (packages.txt)
   7. moonshine          — Build and install Moonshine (Wine fork) in chroot
   8. bootloader         — libreldr UEFI install + kernel/initramfs to ESP
   9. splash             — Build and install snowcone boot splash
  10. snowfall           — Build and install snowfall login manager
- 11. frostedglass       — Build and install frostedglass compositor
+ 11. crystallinelattice — Build and install CrystallineLattice compositor
  12. unmount            — Clean detach, print QEMU boot command
 
 Boot chain on the resulting image:
@@ -28,14 +28,14 @@ Boot chain on the resulting image:
             -> snowfall (login manager, takes DRM master,
                         which causes snowcone to detect master loss
                         and exit cleanly)
-            -> frostedglass (minimal compositor, takes DRM master
-                            from snowfall, launches Wine explorer.exe)
-            -> Wine (desktop shell — taskbar, start menu, windows)
+            -> CrystallineLattice (from-scratch DRM/KMS platform layer,
+                                  takes DRM master from snowfall; no
+                                  wlroots, no Wayland)
 
 Usage:
-  sudo ./run.py                            # full build, defaults to nproc
-  sudo ./run.py --restart                  # wipe stage markers
-  sudo ./run.py --only 10_frostedglass     # re-run a single stage
+  sudo ./run.py                                  # full build, defaults to nproc
+  sudo ./run.py --restart                        # wipe stage markers
+  sudo ./run.py --only 10_crystallinelattice     # re-run a single stage
 """
 
 from __future__ import annotations
@@ -51,16 +51,16 @@ from src import (
     stage_02_image,
     stage_03_fetch,
     stage_04_extract,
-    stage_05_portage_setup,
+    stage_05_pacman_setup,
     stage_06_install_packages,
     stage_07_moonshine,
     stage_08_bootloader,
     stage_09_snowfall,
-    stage_10_frostedglass,
+    stage_10_crystallinelattice,
     stage_11_splash,
     stage_12_unmount,
 )
-from src.common import (
+from src.core import (
     BuildState,
     Config,
     STAGES,
@@ -79,11 +79,11 @@ OVERLAY_DIR = REPO_ROOT / "yeti-overlay"
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="YetiOS build orchestrator (Gentoo-based)",
+        description="YetiOS build orchestrator (Artix-based, OpenRC)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--build-dir", default=str(REPO_ROOT / "build"),
-                   help="Output directory for image and stage3 cache")
+                   help="Output directory for image and bootstrap cache")
     p.add_argument("--size", type=int, default=20,
                    help="Image size in GB")
     p.add_argument("--mount", default="/mnt/yetios",
@@ -94,10 +94,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tz", default="UTC", help="Timezone")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 2,
                    help="Parallel jobs (default: $(nproc))")
-    p.add_argument("--mirror", default="https://distfiles.gentoo.org/",
-                   help="Gentoo distfiles mirror base URL")
-    p.add_argument("--variant", default="amd64-openrc",
-                   help="Stage3 variant (amd64-openrc, amd64-systemd, etc.)")
+    p.add_argument("--artix-mirror", default="https://mirror1.artixlinux.org/repos",
+                   help="Artix repo mirror base ($repo/os/$arch is appended)")
+    p.add_argument("--arch-mirror", default="https://geo.mirror.pkgbuild.com",
+                   help="Arch repo mirror base ($repo/os/$arch is appended)")
+    p.add_argument("--init", default="openrc",
+                   choices=["openrc", "runit", "s6", "dinit"],
+                   help="Artix init system to bootstrap")
     p.add_argument("--restart", action="store_true",
                    help="Wipe stage markers and start over (preserves image)")
     p.add_argument("--only", choices=STAGES, default=None,
@@ -146,9 +149,9 @@ def main() -> int:
             stage_04_extract.run_stage(cfg)
             state.mark("04_extract")
 
-        if should_run("05_portage_setup"):
-            stage_05_portage_setup.run_stage(cfg)
-            state.mark("05_portage_setup")
+        if should_run("05_pacman_setup"):
+            stage_05_pacman_setup.run_stage(cfg)
+            state.mark("05_pacman_setup")
 
         if should_run("06_install_packages"):
             stage_06_install_packages.run_stage(cfg)
@@ -170,9 +173,9 @@ def main() -> int:
             stage_09_snowfall.run_stage(cfg)
             state.mark("09_snowfall")
 
-        if should_run("10_frostedglass"):
-            stage_10_frostedglass.run_stage(cfg)
-            state.mark("10_frostedglass")
+        if should_run("10_crystallinelattice"):
+            stage_10_crystallinelattice.run_stage(cfg)
+            state.mark("10_crystallinelattice")
 
         if should_run("11_unmount"):
             stage_12_unmount.run_stage(cfg, loop)

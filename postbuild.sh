@@ -1,23 +1,29 @@
 #!/bin/bash
 set -euo pipefail
 
+# NOTE: this whole script is rendered through Python str.format() (stage 06),
+# so literal curly braces must be avoided and shell vars use the bare $VAR
+# form only (no brace-delimited expansions).
+
 YETI_USER="{yeti_user}"
 HOSTNAME="{hostname}"
 TIMEZONE="{timezone}"
 
 echo "[yeti] hostname: $HOSTNAME"
 echo "$HOSTNAME" > /etc/hostname
-sed -i "s/localhost/$HOSTNAME localhost/" /etc/hosts || \
+if grep -q localhost /etc/hosts 2>/dev/null; then
+    sed -i "s/localhost/$HOSTNAME localhost/" /etc/hosts
+else
     echo "127.0.0.1 $HOSTNAME localhost" >> /etc/hosts
+fi
 
 echo "[yeti] timezone: $TIMEZONE"
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
 
-echo "[yeti] locale"
-echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
+echo "[yeti] locale (en_US.UTF-8)"
+sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
 locale-gen
-echo 'LANG="en_US.UTF-8"' > /etc/env.d/02locale
-env-update
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
 
 echo "[yeti] configuring dhcpcd and DNS fallback"
 cat > /etc/dhcpcd.conf <<'DHCP_EOF'
@@ -41,23 +47,12 @@ nameserver 1.1.1.1
 DNS_EOF
 fi
 
-# Create basic /etc/conf.d/net configuration for netifrc compatibility
-mkdir -p /etc/conf.d
-cat > /etc/conf.d/net <<'NET_EOF'
-# YetiOS network config — dhcpcd handles all interfaces.
-# This file exists for netifrc compatibility.
-NET_EOF
-
-echo "[yeti] installing sudo and seatd"
-mkdir -p /etc/portage/package.use
-echo "sys-auth/seatd server" > /etc/portage/package.use/seatd
-emerge --noreplace app-admin/sudo
-emerge --oneshot sys-auth/seatd
+echo "[yeti] sudo: wheel group"
 mkdir -p /etc/sudoers.d
 echo "%wheel ALL=(ALL) ALL" > /etc/sudoers.d/wheel
 chmod 440 /etc/sudoers.d/wheel
 
-# Ensure the seat group exists (seatd should create it, but be safe)
+# seatd-openrc creates the seat group, but be safe.
 getent group seat >/dev/null 2>&1 || groupadd seat
 
 echo "[yeti] creating user $YETI_USER"
@@ -79,34 +74,16 @@ chown -R "$YETI_USER:$YETI_USER" "/home/$YETI_USER/.cache"
 # via DRM. If agetty also opens tty1 with --autologin, it scribbles
 # over snowfall's framebuffer and login becomes a race condition.
 #
-# tty2..tty6 still get a normal agetty from the default /etc/inittab,
-# so Ctrl+Alt+F2 etc. still give you a text console for recovery.
+# tty2..tty6 still get a normal agetty, so Ctrl+Alt+F2 etc. still give
+# you a text console for recovery.
 echo "[yeti] tty1 is owned by snowfall — leaving inittab default"
 
-echo "[yeti] enabling services"
-# seatd's OpenRC service may not be installed if the binpkg lacked
-# the 'server' USE flag.  Write a minimal one ourselves if missing.
-if [ ! -f /etc/init.d/seatd ]; then
-    echo "[yeti] creating seatd OpenRC service (not shipped by binpkg)"
-    cat > /etc/init.d/seatd <<'SEATD_EOF'
-#!/sbin/openrc-run
-
-description="Seat management daemon"
-command="/usr/bin/seatd"
-command_args="-g seat"
-command_background=true
-pidfile="/run/seatd.pid"
-
-depend() {{
-    need udev
-}}
-SEATD_EOF
-    chmod 755 /etc/init.d/seatd
-fi
-
-rc-update add seatd boot
-rc-update add dhcpcd default
-rc-update add dbus default
-rc-update add elogind boot
+echo "[yeti] enabling OpenRC services"
+# udev (eudev) lives in sysinit; the rest in boot/default. Idempotent.
+rc-update add udev sysinit 2>/dev/null || true
+rc-update add elogind boot 2>/dev/null || true
+rc-update add seatd boot 2>/dev/null || true
+rc-update add dbus default 2>/dev/null || true
+rc-update add dhcpcd default 2>/dev/null || true
 
 echo "[yeti] done"

@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from .common import Config, losetup_detach, ok, warn, run, step_banner
+from .core import Config, losetup_detach, ok, warn, run, step_banner
 
 
 def _verify_image(cfg: Config) -> None:

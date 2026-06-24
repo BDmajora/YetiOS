@@ -1,53 +1,60 @@
 """
-Stage 4 — extract the stage3 tarball into the mounted image.
+Stage 4 — bootstrap a minimal Artix base into the mounted image.
+
+Runs the cached artix-bootstrap.sh (stage 3) against the target mountpoint.
+The script downloads pacman + glibc, then pacstraps `base`, the chosen init
+(OpenRC), `elogind-<init>`, and `artix-keyring` into the image. After this the
+image holds a working, self-contained pacman; stage 5 configures the repos and
+stage 6 installs the YetiOS userland.
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
-from pathlib import Path
 
-from .common import Config, ok, run, step_banner, warn, err
+from .core import Config, err, info, ok, run, step_banner, warn
 
 
 def run_stage(cfg: Config) -> None:
-    step_banner("Stage 4 — Extract stage3")
+    step_banner("Stage 4 — Bootstrap Artix base")
 
-    # Sanity: skip if the target already looks populated
-    if (cfg.mount / "etc" / "gentoo-release").exists():
-        warn("Target already contains a Gentoo system; skipping extract.")
+    # Sanity: skip if the target already looks bootstrapped.
+    if (cfg.mount / "usr/bin/pacman").exists():
+        warn("Target already contains pacman; skipping bootstrap.")
         return
 
+    if not cfg.bootstrap_script.exists():
+        err(f"artix-bootstrap.sh not found at {cfg.bootstrap_script}.")
+        err("Re-run stage 3 (fetch) first.")
+        raise FileNotFoundError(cfg.bootstrap_script)
+
+    # Preserve the downloaded packages across retries so a re-run after a
+    # transient failure doesn't redownload the whole base.
+    pkg_cache = cfg.bootstrap_cache / "pkgs"
+    pkg_cache.mkdir(parents=True, exist_ok=True)
+
+    info(f"bootstrapping {cfg.init} base into {cfg.mount} ...")
+    info("(downloads pacman + the Artix base — this fetches a few hundred MB)")
+
     try:
-        # Added sudo to ensure root-level xattr/ownership preservation
         run([
-            "sudo", "tar", "xpf", str(cfg.stage3_tarball),
-            "--xattrs-include=*.*",
-            "--numeric-owner",
-            "-C", str(cfg.mount),
+            "bash", str(cfg.bootstrap_script),
+            "-i", cfg.init,
+            "-r", cfg.artix_mirror,
+            "-d", str(pkg_cache),
+            str(cfg.mount),
         ])
     except subprocess.CalledProcessError:
-        err("Tar extraction failed! The archive is likely a corrupt text/HTML file.")
-
-        # 1. Kill the corrupt tarball
-        if cfg.stage3_tarball.exists():
-            warn(f"Removing corrupt archive: {cfg.stage3_tarball}")
-            run(["sudo", "rm", "-f", str(cfg.stage3_tarball)])
-
-        # 2. Kill the Stage 3 marker so the orchestrator re-fetches next time.
-        #    Markers live in build_dir/.yeti-state/<stage> (see BuildState),
-        #    NOT build_dir/.stage_03_fetch — the old path silently did nothing.
-        marker = cfg.build_dir / ".yeti-state" / "03_fetch"
+        err("artix-bootstrap failed.")
+        # Drop the stage-4 marker so a re-run retries the bootstrap.
+        marker = cfg.build_dir / ".yeti-state" / "04_extract"
         if marker.exists():
-            warn(f"Removing Stage 3 marker to force re-fetch: {marker}")
-            run(["sudo", "rm", "-f", str(marker)])
+            warn(f"Removing stage 4 marker to force re-bootstrap: {marker}")
+            marker.unlink()
+        raise
 
-        raise  # Crash out so the user can re-run
+    if not (cfg.mount / "usr/bin/pacman").exists():
+        err("Bootstrap finished but /usr/bin/pacman is missing in the target.")
+        raise RuntimeError("artix-bootstrap produced an incomplete rootfs")
 
-    # Ensure critical portage directories exist with proper permissions
-    for d in ["var/cache/binpkgs", "var/db/repos/gentoo", "var/log/portage"]:
-        target_dir = cfg.mount / d
-        run(["sudo", "mkdir", "-p", str(target_dir)])
-
-    ok(f"stage3 extracted into {cfg.mount}")
+    ok(f"Artix {cfg.init} base bootstrapped into {cfg.mount}")

@@ -1,9 +1,9 @@
 """
-src/common.py — shared utilities used by every stage module.
+src/core.py — shared build toolkit used by every stage module.
 
 Logging, subprocess wrapper, Config dataclass, BuildState for resumability,
-and loop-device helpers. Nothing here should know about specific build
-stages.
+package-list parsing, and loop-device / chroot helpers. Nothing here should
+know about specific build stages.
 """
 
 from __future__ import annotations
@@ -70,6 +70,17 @@ def have(tool: str) -> bool:
     return shutil.which(tool) is not None
 
 
+def read_package_list(path: Path) -> "list[str]":
+    """Parse packages.txt — one package per line, ignoring blank lines and
+    `#` comments (including inline trailing comments)."""
+    pkgs = []
+    for line in path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            pkgs.append(line)
+    return pkgs
+
+
 # ---------------------------------------------------------------------------
 # Stage tracking
 # ---------------------------------------------------------------------------
@@ -80,13 +91,13 @@ STAGES = [
     "02_image_mount",
     "03_fetch",
     "04_extract",
-    "05_portage_setup",
+    "05_pacman_setup",
     "06_install_packages",
     "07_moonshine",
     "07_bootloader",
     "08_splash",
     "09_snowfall",
-    "10_frostedglass",
+    "10_crystallinelattice",
     "11_unmount",
 ]
 
@@ -136,8 +147,9 @@ class Config:
     timezone: str
     jobs: int
     overlay_dir: Path
-    stage3_mirror: str
-    stage3_variant: str
+    artix_mirror: str
+    arch_mirror: str
+    init: str
 
     @classmethod
     def from_args(cls, args: argparse.Namespace, overlay_dir: Path) -> "Config":
@@ -152,21 +164,31 @@ class Config:
             timezone=args.tz,
             jobs=args.jobs,
             overlay_dir=overlay_dir,
-            stage3_mirror=args.mirror,
-            stage3_variant=args.variant,
+            artix_mirror=args.artix_mirror,
+            arch_mirror=args.arch_mirror,
+            init=args.init,
         )
 
     @property
-    def stage3_cache(self) -> Path:
-        return self.build_dir / "stage3-cache"
+    def repo_root(self) -> Path:
+        return self.build_dir.parent
 
     @property
-    def stage3_tarball(self) -> Path:
-        return self.stage3_cache / "stage3.tar.xz"
+    def bootstrap_cache(self) -> Path:
+        return self.build_dir / "bootstrap-cache"
+
+    @property
+    def bootstrap_script(self) -> Path:
+        """Cached copy of the upstream artix-bootstrap.sh."""
+        return self.bootstrap_cache / "artix-bootstrap.sh"
+
+    @property
+    def packages_file(self) -> Path:
+        return self.repo_root / "packages.txt"
 
     @property
     def postbuild_script(self) -> Path:
-        return self.build_dir.parent / "postbuild.sh"
+        return self.repo_root / "postbuild.sh"
 
 
 # ---------------------------------------------------------------------------

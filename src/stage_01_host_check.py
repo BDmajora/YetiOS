@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 
-from .common import Config, err, have, ok, step_banner, warn
+from .core import Config, err, have, ok, step_banner, warn
 
 
 REQUIRED_HOST_TOOLS = [
@@ -13,8 +13,8 @@ REQUIRED_HOST_TOOLS = [
     "qemu-img", "parted",
     "mkfs.ext4", "mkfs.vfat",
     "losetup", "mount", "umount",
-    # Download + extract stage3
-    "wget", "tar", "xz",
+    # Fetch + run artix-bootstrap (downloads + extracts .pkg.tar.zst packages)
+    "wget", "curl", "tar", "xz", "zstd", "gzip", "gawk", "sed",
     # Chroot
     "chroot",
     # Fetch repos + build libreldr (UEFI binary, built on host)
@@ -37,8 +37,8 @@ def run_stage(cfg: Config) -> None:
     if missing:
         err("Missing host tools: " + ", ".join(missing))
         err("On Debian/Ubuntu/Mint:")
-        err("  apt install parted util-linux dosfstools qemu-utils \\")
-        err("              wget tar xz-utils git build-essential gnu-efi")
+        err("  apt install parted util-linux dosfstools qemu-utils wget curl \\")
+        err("              tar xz-utils zstd gawk git build-essential gnu-efi")
         sys.exit(1)
 
     needed_gb = cfg.img_size_gb + 5
