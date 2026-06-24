@@ -45,6 +45,8 @@ libdrm                      # CrystallineLattice DRM/KMS
 libinput
 libxkbcommon
 seatd                       # DRM/input access (libseat) for CrystallineLattice
+seatd-openrc                # /etc/init.d/seatd — REQUIRED, else seatd never starts
+                            #   and glacier's libseat fails with ENOSYS (black screen)
 
 # ---- Login manager (snowfall) runtime deps ----
 cairo
