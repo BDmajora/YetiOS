@@ -130,6 +130,21 @@ def _install_packages(cfg: Config) -> int:
         err(f"No packages found in {cfg.packages_file}.")
         raise RuntimeError("empty package list")
 
+    # YetiOS uses seatd-openrc as the init-logind provider, not elogind-openrc
+    # (they conflict — both provide init-logind, which 'base' requires). An
+    # earlier build/bootstrap installs elogind-openrc by default, so the
+    # seatd-openrc install below would abort on the conflict. Force-remove it
+    # first: plain `-R` is refused because 'base' needs init-logind, so use
+    # `-Rdd` to skip the dep check — seatd-openrc re-provides init-logind in the
+    # very next transaction, so the end state is consistent. Non-fatal: `-R`
+    # errors with "target not found" when elogind-openrc isn't installed.
+    info("Selecting seatd-openrc as init-logind provider (removing elogind-openrc) ...")
+    in_chroot(
+        cfg,
+        "pacman -Rdd --noconfirm elogind-openrc 2>/dev/null || true",
+        check=False,
+    )
+
     info(f"Installing {len(pkgs)} packages with pacman ...")
     # --needed skips up-to-date packages; base-devel is a group and expands
     # to all its members non-interactively under --noconfirm.

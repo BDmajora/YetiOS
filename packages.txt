@@ -19,8 +19,12 @@ mkinitcpio                  # initramfs generator (pacman hook builds initramfs-
 # ---- Init / userland base ----
 openrc                      # also pulled by the bootstrap; provides /etc/init.d/agetty
                             # (the getty service — no separate agetty package on Artix)
-elogind                     # systemd-logind replacement (seat/session for polkit/seatd)
-elogind-openrc
+elogind                     # libelogind + pam_elogind.so (polkit/session libs). The
+                            # elogind-openrc SERVICE is intentionally omitted: it
+                            # conflicts with seatd-openrc (both provide the init-logind
+                            # virtual that 'base' requires). YetiOS uses seatd as the
+                            # seat/init-logind provider (see seatd-openrc below), so the
+                            # elogind daemon just isn't run as a service.
 bash
 sudo
 
@@ -45,8 +49,10 @@ libdrm                      # CrystallineLattice DRM/KMS
 libinput
 libxkbcommon
 seatd                       # DRM/input access (libseat) for CrystallineLattice
-seatd-openrc                # /etc/init.d/seatd — REQUIRED, else seatd never starts
-                            #   and glacier's libseat fails with ENOSYS (black screen)
+seatd-openrc                # /etc/init.d/seatd + provides the init-logind virtual
+                            # (replacing elogind-openrc). REQUIRED — without seatd
+                            # running, glacier's libseat fails with ENOSYS (black
+                            # screen). postbuild's 'rc-update add seatd boot' enables it.
 
 # ---- Login manager (snowfall) runtime deps ----
 cairo
