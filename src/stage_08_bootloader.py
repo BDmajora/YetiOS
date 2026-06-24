@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -171,6 +172,15 @@ def run_stage(cfg: Config, loop: str) -> None:
     step_banner("Stage 7 — Install libreldr (UEFI)")
 
     boot = cfg.mount / "boot"
+
+    # The ESP MUST be mounted here. If it isn't, BOOTX64.EFI + the kernel would
+    # be written to the ext4 root's /boot and the real FAT ESP would boot empty
+    # (the firmware drops to the UEFI shell). Fail loudly instead.
+    if not os.path.ismount(boot):
+        err(f"{boot} is not a mountpoint — the ESP is not mounted. Refusing to "
+            "install the bootloader onto the root filesystem. Re-run the build.")
+        sys.exit(1)
+
     kernel, initrd = _resolve_kernel_paths(cfg)
 
     libreldr_dir = _ensure_libreldr(cfg)

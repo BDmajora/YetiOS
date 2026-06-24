@@ -135,11 +135,15 @@ def main() -> int:
             stage_02_image.run_create(cfg)
             state.mark("02_image_create")
 
-        # Image must be mounted for every later stage; re-attach if needed.
-        loop = loop_for(cfg.img_path) or losetup_attach(cfg.img_path)
-        if should_run("02_image_mount") or not os.path.ismount(cfg.mount):
-            loop = stage_02_image.run_mount(cfg)
-            state.mark("02_image_mount")
+        # Mounting is ephemeral runtime state, NOT a resumable build artifact,
+        # so (re)mount on EVERY run rather than gating on a marker. This is
+        # what guarantees the FAT ESP is mounted at <mount>/boot before any
+        # stage writes the kernel or EFI files there. (Previously, if the root
+        # was already mounted from a prior run the mount step was skipped and
+        # the ESP was never mounted — the bootloader + kernel then landed on
+        # the ext4 root's /boot and the real ESP booted empty → UEFI shell.)
+        loop = stage_02_image.run_mount(cfg)
+        state.mark("02_image_mount")
 
         if should_run("03_fetch"):
             stage_03_fetch.run_stage(cfg)

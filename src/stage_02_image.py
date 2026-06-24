@@ -11,9 +11,11 @@ produced by `installkernel` land where libreldr expects them.
 from __future__ import annotations
 
 import os
+import sys
 
 from .core import (
     Config,
+    err,
     losetup_attach,
     loop_for,
     ok,
@@ -86,5 +88,16 @@ def run_mount(cfg: Config) -> str:
     if not os.path.ismount(cfg.mount / "boot"):
         run(["mount", esp_part, str(cfg.mount / "boot")])
 
-    ok(f"target root = {cfg.mount}")
+    # Hard postcondition: BOTH must be mounted before any stage writes to them.
+    # If the ESP isn't mounted here, the kernel and bootloader land on the ext4
+    # root's /boot and the real ESP boots empty (→ UEFI shell, no loader).
+    if not os.path.ismount(cfg.mount):
+        err(f"root failed to mount at {cfg.mount}")
+        sys.exit(1)
+    if not os.path.ismount(cfg.mount / "boot"):
+        err(f"ESP failed to mount at {cfg.mount}/boot — aborting so the "
+            "bootloader isn't written to the root filesystem instead.")
+        sys.exit(1)
+
+    ok(f"target root = {cfg.mount}, ESP mounted at {cfg.mount}/boot")
     return loop
