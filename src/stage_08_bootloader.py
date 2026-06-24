@@ -37,13 +37,7 @@ def _sha256(path: Path) -> str:
 
 
 def _ensure_libreldr(cfg: Config) -> Path:
-    """Wipe any cached clone, re-clone, build, return the repo dir.
-
-    Why wipe every time: the previous behavior of `git pull --ff-only`
-    on a cached clone could silently skip rebuilds when permissions or
-    object cache got into a bad state, leaving a stale libreldr.efi.
-    Building from scratch is cheap (~2s) and guarantees correctness.
-    """
+    """Wipe any cached clone, re-clone, build, return the repo dir."""
     src_dir  = cfg.build_dir / "libreldr"
     efi_path = src_dir / "libreldr.efi"
 
@@ -95,11 +89,62 @@ def _load_libreldr_entries(repo_dir: Path):
 
 def _resolve_kernel_paths(cfg: Config) -> tuple[Path, Path | None]:
     boot = cfg.mount / "boot"
-    kernels = sorted(boot.glob("vmlinuz-*"))
-    initrds = sorted(boot.glob("initramfs-*.img"))
-    if not kernels:
-        err("No vmlinuz-* found in /boot.")
+    info(f"Checking for kernel in {boot} ...")
+    
+    # DIAGNOSTIC: List everything in /boot so we can see what's there
+    if boot.is_dir():
+        all_files = list(boot.iterdir())
+        if all_files:
+            info("Contents of /boot inside the image:")
+            for f in sorted(all_files):
+                info(f"  {f.name}")
+        else:
+            warn("/boot is completely empty!")
+    else:
+        err(f"/boot directory does not exist at {boot}")
         sys.exit(1)
+
+    kernels = sorted(boot.glob("vmlinuz-*"))
+    
+    # RESILIENCE: If pacman skipped the kernel post-install script (which
+    # happens if a previous build was interrupted and re-run), the kernel
+    # files remain stuck in /usr/lib/modules and /boot is empty.
+    if not kernels:
+        info("Kernel not in /boot. Checking if pacman left it in /usr/lib/modules...")
+        modules_dir = cfg.mount / "usr" / "lib" / "modules"
+        module_vmlinuz = sorted(modules_dir.glob("*/vmlinuz"))
+        
+        if module_vmlinuz:
+            warn("Kernel package installed, but post-install hook was skipped.")
+            warn("This is normal after an interrupted build. Fixing automatically...")
+            
+            kernel_src = module_vmlinuz[-1]
+            kernel_dst = boot / f"vmlinuz-{kernel_src.parent.name}"
+            
+            info(f"Copying {kernel_src} -> {kernel_dst}")
+            shutil.copy2(kernel_src, kernel_dst)
+            
+            info("Generating initramfs via mkinitcpio...")
+            # Import locally to avoid circular dependencies at module level
+            from .core import chroot_mount, chroot_umount, in_chroot
+            chroot_mount(cfg)
+            try:
+                in_chroot(cfg, "mkinitcpio -P")
+            finally:
+                chroot_umount(cfg)
+            
+            # Re-check after regeneration
+            kernels = sorted(boot.glob("vmlinuz-*"))
+            if not kernels:
+                err("Failed to regenerate kernel in /boot.")
+                sys.exit(1)
+            ok("Kernel and initramfs successfully regenerated in /boot")
+        else:
+            err("No vmlinuz-* found in /boot AND no kernel in /usr/lib/modules.")
+            err("The 'linux' package is missing entirely. Check Stage 6.")
+            sys.exit(1)
+
+    initrds = sorted(boot.glob("initramfs-*.img"))
     kernel = kernels[-1]
     initrd = initrds[-1] if initrds else None
     if not initrd:
