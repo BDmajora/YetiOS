@@ -80,8 +80,12 @@ echo "[yeti] tty1 is owned by snowfall — leaving inittab default"
 
 echo "[yeti] enabling OpenRC services"
 # udev (eudev) lives in sysinit; the rest in boot/default.
+#
+# No elogind SERVICE here: YetiOS installs elogind for its libs/PAM bits but
+# uses seatd-openrc (added below) as the init-logind provider — elogind-openrc
+# is deliberately omitted (it conflicts with seatd-openrc over init-logind),
+# so /etc/init.d/elogind doesn't exist. See packages.txt.
 rc-update add udev sysinit || true
-rc-update add elogind boot || true
 rc-update add dbus default || true
 rc-update add dhcpcd default || true
 
