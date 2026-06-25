@@ -1,9 +1,12 @@
 """Stage 10 — CrystallineLattice compositor installation (chroot build).
 
 CrystallineLattice (binary: `glacier`) is a from-scratch DRM/KMS
-platform layer purpose-built for YetiOS. Unlike the old frostedglass
-compositor it does NOT use wlroots or Wayland — it talks to libdrm/GBM/EGL/
-GLES directly and acquires devices through seatd (libseat).
+platform layer purpose-built for YetiOS. It talks to libdrm/GBM/EGL/GLES and
+libinput directly and acquires devices through seatd (libseat) — there is NO
+wlroots and NO upstream Wayland compositor underneath. It hosts native Linux
+apps through its OWN minimal Wayland frontend (libwayland-server + a frozen
+xdg-shell/xdg-decoration subset; Transport B), plus Xwayland for legacy X11 —
+glacier's own code, not wlroots, not Weston.
 
 Built inside the chroot (like the rest of the snow suite) so it links against
 the target's libdrm/mesa/libseat rather than the host's, avoiding ABI drift.
@@ -48,6 +51,8 @@ CHROOT_BUILD_PKGS = [
     "glesv2",
     "libudev",
     "libseat",
+    "wayland-server",      # Transport B: the Wayland compatibility frontend
+    "wayland-protocols",   # xdg-shell + xdg-decoration XML (scanned at build time)
 ]
 
 
@@ -101,8 +106,16 @@ def _build_in_chroot(cfg: Config, host_src: Path) -> None:
             if cp.returncode != 0:
                 err(f"Missing pkg-config module in chroot: {pkg}")
                 err("Ensure the providing package is in packages.txt "
-                    "(mesa, libglvnd, libdrm, seatd, udev).")
+                    "(mesa, libglvnd, libdrm, seatd, udev, wayland, "
+                    "wayland-protocols).")
                 sys.exit(1)
+
+        # The Wayland frontend's meson build scans xdg-shell/xdg-decoration XML
+        # with wayland-scanner (a binary from the `wayland` package, not a .pc).
+        cp = in_chroot(cfg, "command -v wayland-scanner", check=False)
+        if cp.returncode != 0:
+            err("wayland-scanner not found in chroot (provided by `wayland`).")
+            sys.exit(1)
 
         # Configure + build + install via meson/ninja.
         info("Building CrystallineLattice inside chroot ...")

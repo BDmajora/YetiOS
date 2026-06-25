@@ -42,8 +42,13 @@ mesa                        # OpenGL + Vulkan drivers
 vulkan-icd-loader           # libvulkan.so dispatch
 vulkan-mesa-layers
 libglvnd                    # EGL/OpenGL dispatch
-wayland
-wayland-protocols
+wayland                     # libwayland-server/-client + wayland-scanner: glacier's
+                            # own Wayland compatibility frontend (Transport B) — hosts
+                            # native GTK/Qt/Electron apps. NOT wlroots, NOT a compositor.
+wayland-protocols           # xdg-shell + xdg-decoration XML (scanned at build time)
+xorg-xwayland               # Xwayland: legacy X11 apps (e.g. xterm) bridged onto the
+                            # Wayland frontend. Optional per image; modern toolkits are
+                            # Wayland-native, so this is for the X11 tail only.
 pixman                      # 2D pixel library (cairo dependency / CPU fallback path)
 libdrm                      # CrystallineLattice DRM/KMS
 libinput
@@ -87,8 +92,9 @@ meson                       # CrystallineLattice build system (pulls ninja)
 git                         # source clones inside chroot
 linux-headers               # DRM headers for snowcone
 
-# ---- Dev / debug affordances ----
-foot                        # Wayland terminal (dev affordance)
+# ---- Terminal ----
+foot                        # default terminal — glacier spawns it on Ctrl+Alt+T as a
+                            # native Wayland client (override with $GLACIER_TERMINAL).
 ttf-dejavu                  # monospace font so foot has something to render
 
 # ---- Flatpak (sandboxed Linux GUI apps; Flathub remote added in stage 06) ----
