@@ -6,7 +6,7 @@ builds it inside the chroot against the target's libraries, then installs
 it in-place.
 
 WHY CHROOT BUILD: Moonshine/Wine links against dozens of shared libraries
-(wayland-client, vulkan, freetype, gnutls, …). Building on the host
+(vulkan, freetype, gnutls, …). Building on the host
 produces binaries linked against the host's library versions, which may
 differ from the target rootfs.  This causes anything from subtle ABI
 mismatches to outright "symbol not found" crashes at runtime.  Building
@@ -41,13 +41,15 @@ from .core import (
 MOONSHINE_REPO   = "https://github.com/BDmajora/Moonshine.git"
 MOONSHINE_BRANCH = "stable"
 
-# pkg-config modules that must exist inside the chroot before configure.
-# These are the Wayland/Vulkan deps that Moonshine needs at link time.
+# pkg-config modules Moonshine needs inside the chroot before configure.
+#
+# YetiOS builds Wine with the CrystallineLattice driver (winedrm.drv, Path β),
+# NOT the Wayland driver. winedrm links only libwin32u + pthread, so it needs
+# NO wayland-client/wayland-egl/xkbcommon/xkbregistry dev libs — those belonged
+# to winewayland.drv, which we no longer build. glacier (stage 10) owns the
+# Wayland *frontend* for native Linux apps; Wine itself never speaks Wayland.
+# What's left here are the Wine-core link deps worth verifying up front.
 CHROOT_BUILD_PKGS = [
-    "wayland-client",
-    "wayland-egl",
-    "xkbcommon",
-    "xkbregistry",
     "freetype2",
     "vulkan",
 ]
@@ -121,9 +123,14 @@ def _build_in_chroot(cfg: Config, host_src: Path) -> None:
             warn("Moonshine may configure without some optional features.")
             warn("Add the providing packages to packages.txt if needed.")
 
-        # Configure — enable 64-bit Wine with Wayland support
-        info("Configuring Moonshine inside chroot ...")
-        in_chroot(cfg, "cd /tmp/moonshine && ./configure --enable-win64 --with-wayland")
+        # Configure — 64-bit Wine with the CrystallineLattice driver (winedrm).
+        # --with-drm is the meaningful switch: it selects winedrm.drv as the Wine
+        # display path AND disables the Wayland driver (they're alternative
+        # backends), so winewayland.drv and its wayland-client/xkb deps stay out
+        # of the build. winedrm registers as a graphics driver, so configure does
+        # NOT fall back to demanding X11 dev files (this rootfs ships no Xorg).
+        info("Configuring Moonshine inside chroot (--with-drm: winedrm driver) ...")
+        in_chroot(cfg, "cd /tmp/moonshine && ./configure --enable-win64 --with-drm")
 
         # Build with parallel jobs
         info(f"Building Moonshine inside chroot using {cfg.jobs} parallel jobs ...")
