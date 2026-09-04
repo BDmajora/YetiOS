@@ -1,15 +1,10 @@
-"""
-src/core.py — shared build toolkit used by every stage module.
-
-Logging, subprocess wrapper, Config dataclass, BuildState for resumability,
-package-list parsing, and loop-device / chroot helpers. Nothing here should
-know about specific build stages.
-"""
+"""Shared toolkit for the YetiOS FreeBSD image pipeline."""
 
 from __future__ import annotations
 
 import argparse
-import os
+import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -17,10 +12,6 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 
 USE_COLOR = sys.stdout.isatty()
 
@@ -30,9 +21,9 @@ def _c(code: str, s: str) -> str:
 
 
 def info(msg: str) -> None: print(_c("36", "[*]"), msg)
-def ok(msg: str)   -> None: print(_c("32", "[+]"), msg)
+def ok(msg: str) -> None: print(_c("32", "[+]"), msg)
 def warn(msg: str) -> None: print(_c("33", "[!]"), msg, file=sys.stderr)
-def err(msg: str)  -> None: print(_c("31", "[x]"), msg, file=sys.stderr)
+def err(msg: str) -> None: print(_c("31", "[x]"), msg, file=sys.stderr)
 
 
 def step_banner(name: str) -> None:
@@ -43,26 +34,17 @@ def step_banner(name: str) -> None:
     print(_c("35", bar))
 
 
-# ---------------------------------------------------------------------------
-# Shell helpers
-# ---------------------------------------------------------------------------
-
-def run(cmd: "list[str] | str", *, check: bool = True, env: "dict | None" = None,
-        cwd: "Path | str | None" = None,
-        capture: bool = False) -> subprocess.CompletedProcess:
-    """Run a command, streaming output by default."""
-    if isinstance(cmd, str):
-        printable = cmd
-        shell = True
-    else:
-        printable = " ".join(shlex.quote(c) for c in cmd)
-        shell = False
+def run(cmd: list[str], *, check: bool = True, capture: bool = False,
+        cwd: Path | str | None = None) -> subprocess.CompletedProcess:
+    printable = " ".join(shlex.quote(c) for c in cmd)
     info(f"$ {printable}")
     return subprocess.run(
-        cmd, shell=shell, check=check, env=env, cwd=cwd,
+        cmd,
+        check=check,
+        cwd=cwd,
+        text=True,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
-        text=True,
     )
 
 
@@ -70,43 +52,61 @@ def have(tool: str) -> bool:
     return shutil.which(tool) is not None
 
 
-def read_package_list(path: Path) -> "list[str]":
-    """Parse packages.txt — one package per line, ignoring blank lines and
-    `#` comments (including inline trailing comments)."""
-    pkgs = []
-    for line in path.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            pkgs.append(line)
-    return pkgs
-
-
-# ---------------------------------------------------------------------------
-# Stage tracking
-# ---------------------------------------------------------------------------
-
 STAGES = [
     "01_host_check",
-    "02_image_create",
-    "02_image_mount",
-    "03_fetch",
-    "04_extract",
-    "05_pacman_setup",
-    "06_install_packages",
-    "07_moonshine",
-    "07_bootloader",
-    "08_splash",
-    "09_snowfall",
-    "10_crystallinelattice",
-    "11_unmount",
+    "02_fetch_release",
+    "03_stage_root",
+    "04_bootstrap_esp",
+    "05_assemble_image",
+    "06_libvirt_access",
+    "07_manifest",
 ]
+
+RELEASE_SETS = ("base.txz", "kernel.txz")
+
+
+def parse_size_to_bytes(value: str) -> int:
+    m = re.fullmatch(r"\s*(\d+)\s*([kmgtKMGT]?)\s*", value)
+    if not m:
+        raise ValueError(f"invalid size value: {value!r}")
+    number = int(m.group(1))
+    suffix = m.group(2).lower()
+    scale = {
+        "": 1,
+        "k": 1024,
+        "m": 1024 ** 2,
+        "g": 1024 ** 3,
+        "t": 1024 ** 4,
+    }[suffix]
+    return number * scale
+
+
+def ensure_clean_dir(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def host_system() -> str:
+    return platform.system()
+
+
+def read_package_list(path: Path) -> list[str]:
+    packages: list[str] = []
+    for raw in path.read_text(errors="replace").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            packages.append(line)
+    return packages
 
 
 @dataclass
 class BuildState:
-    """Tracks which stages have completed via marker files in .yeti-state/."""
+    """Tracks completed stages via marker files in build/.yeti-state/."""
+
     build_dir: Path
-    completed: set = field(default_factory=set)
+    completed: set[str] = field(default_factory=set)
+    signatures: dict[str, str] = field(default_factory=dict)
 
     @property
     def state_dir(self) -> Path:
@@ -115,58 +115,74 @@ class BuildState:
     def load(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         for stage in STAGES:
-            if (self.state_dir / stage).exists():
+            marker = self.state_dir / stage
+            if marker.exists():
                 self.completed.add(stage)
+                self.signatures[stage] = marker.read_text(errors="replace").strip()
 
-    def mark(self, stage: str) -> None:
-        (self.state_dir / stage).touch()
+    def mark(self, stage: str, signature: str) -> None:
+        (self.state_dir / stage).write_text(signature + "\n")
         self.completed.add(stage)
+        self.signatures[stage] = signature
         ok(f"stage complete: {stage}")
 
     def clear(self) -> None:
         if self.state_dir.exists():
             shutil.rmtree(self.state_dir)
         self.completed.clear()
+        self.signatures.clear()
 
-    def done(self, stage: str) -> bool:
-        return stage in self.completed
+    def done(self, stage: str, signature: str) -> bool:
+        return stage in self.completed and self.signatures.get(stage) == signature
 
-
-# ---------------------------------------------------------------------------
-# Config — all build-time parameters in one place
-# ---------------------------------------------------------------------------
 
 @dataclass
 class Config:
     build_dir: Path
     img_path: Path
-    img_size_gb: int
-    mount: Path
-    yeti_user: str
+    release: str
+    arch: str
+    mirror: str
     hostname: str
+    yeti_user: str
+    yeti_password: str
     timezone: str
+    root_size: str
+    local_size: str
+    esp_size: str
+    swap_size: str
     jobs: int
-    overlay_dir: Path
-    artix_mirror: str
-    arch_mirror: str
-    init: str
+    libreldr_dir: Path
+    snowcone_dir: Path
+    moonshine_dir: Path
+    snowfall_dir: Path
+    frostedweb_dir: Path
+    desktop_packages_file: Path
 
     @classmethod
-    def from_args(cls, args: argparse.Namespace, overlay_dir: Path) -> "Config":
+    def from_args(cls, args: argparse.Namespace) -> "Config":
         build_dir = Path(args.build_dir).resolve()
         return cls(
             build_dir=build_dir,
             img_path=build_dir / "yetios.img",
-            img_size_gb=args.size,
-            mount=Path(args.mount),
-            yeti_user=args.yeti_user,
+            release=args.release,
+            arch=args.arch,
+            mirror=args.mirror,
             hostname=args.hostname,
+            yeti_user=args.yeti_user,
+            yeti_password=args.yeti_password,
             timezone=args.tz,
+            root_size=args.root_size,
+            local_size=args.local_size,
+            esp_size=args.esp_size,
+            swap_size=args.swap_size,
             jobs=args.jobs,
-            overlay_dir=overlay_dir,
-            artix_mirror=args.artix_mirror,
-            arch_mirror=args.arch_mirror,
-            init=args.init,
+            libreldr_dir=Path(args.libreldr_dir).resolve(),
+            snowcone_dir=Path(args.snowcone_dir).resolve(),
+            moonshine_dir=Path(args.moonshine_dir).resolve(),
+            snowfall_dir=Path(args.snowfall_dir).resolve(),
+            frostedweb_dir=Path(args.frostedweb_dir).resolve(),
+            desktop_packages_file=Path(args.desktop_packages_file).resolve(),
         )
 
     @property
@@ -174,100 +190,52 @@ class Config:
         return self.build_dir.parent
 
     @property
-    def bootstrap_cache(self) -> Path:
-        return self.build_dir / "bootstrap-cache"
+    def cache_dir(self) -> Path:
+        return self.build_dir / "freebsd-cache"
 
     @property
-    def bootstrap_script(self) -> Path:
-        """Cached copy of the upstream artix-bootstrap.sh."""
-        return self.bootstrap_cache / "artix-bootstrap.sh"
+    def rootfs_dir(self) -> Path:
+        return self.build_dir / "rootfs"
 
     @property
-    def packages_file(self) -> Path:
-        return self.repo_root / "packages.txt"
+    def esp_dir(self) -> Path:
+        return self.build_dir / "esp"
 
     @property
-    def postbuild_script(self) -> Path:
-        return self.repo_root / "postbuild.sh"
+    def release_dir_url(self) -> str:
+        return f"{self.mirror.rstrip('/')}/{self.arch}/{self.release}"
 
+    @property
+    def release_manifest_url(self) -> str:
+        return f"{self.release_dir_url}/MANIFEST"
 
-# ---------------------------------------------------------------------------
-# Loop device helpers
-# ---------------------------------------------------------------------------
+    @property
+    def release_manifest_path(self) -> Path:
+        return self.cache_dir / self.release / self.arch / "MANIFEST"
 
-def losetup_attach(img: Path) -> str:
-    cp = run(["losetup", "--show", "-fP", str(img)], capture=True)
-    return cp.stdout.strip()
+    @property
+    def source_record_path(self) -> Path:
+        return self.build_dir / "FREEBSD_SOURCE.sha256"
 
+    @property
+    def manifest_path(self) -> Path:
+        return self.build_dir / "YETIOS_FREEBSD_IMAGE.txt"
 
-def losetup_detach(loop: str) -> None:
-    run(["losetup", "-d", loop], check=False)
+    @property
+    def release_sets(self) -> tuple[str, ...]:
+        return RELEASE_SETS
 
+    def release_set_url(self, name: str) -> str:
+        return f"{self.release_dir_url}/{name}"
 
-def loop_for(img: Path) -> "str | None":
-    cp = run(["losetup", "-j", str(img)], capture=True, check=False)
-    if cp.returncode != 0 or not cp.stdout.strip():
-        return None
-    return cp.stdout.split(":", 1)[0]
+    def release_set_path(self, name: str) -> Path:
+        return self.cache_dir / self.release / self.arch / name
 
-
-# ---------------------------------------------------------------------------
-# Chroot helpers — used by stages 5, 6, 7, 8, 9, 10
-# ---------------------------------------------------------------------------
-
-CHROOT_BINDS = [
-    ("/dev", "dev"),
-    ("/dev/pts", "dev/pts"),
-    ("/proc", "proc"),
-    ("/sys", "sys"),
-    ("/run", "run"),
-]
-
-
-def chroot_mount(cfg: Config) -> None:
-    """Bind-mount kernel filesystems into the target so chroot works."""
-    for src, dst in CHROOT_BINDS:
-        target = cfg.mount / dst
-        target.mkdir(parents=True, exist_ok=True)
-        if not os.path.ismount(target):
-            run(["mount", "--bind", src, str(target)])
-    resolv = cfg.mount / "etc/resolv.conf"
-    resolv.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy("/etc/resolv.conf", resolv)
-
-
-def chroot_umount(cfg: Config) -> None:
-    """Reverse of chroot_mount, robust to partial state."""
-    for _, dst in reversed(CHROOT_BINDS):
-        target = cfg.mount / dst
-        if os.path.ismount(target):
-            run(["umount", "-l", str(target)], check=False)
-
-
-def in_chroot(cfg: Config, script: str, *, env: "dict | None" = None,
-              check: bool = True) -> subprocess.CompletedProcess:
-    """Run a bash -c script inside the target's chroot."""
-    full_env = {"LC_ALL": "C", "LANG": "C"}
-    if env:
-        full_env.update(env)
-    return run(
-        ["chroot", str(cfg.mount), "/bin/bash", "-c", script],
-        env={**os.environ, **full_env},
-        check=check,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Cleanup helper used by the entry point on failure
-# ---------------------------------------------------------------------------
-
-def emergency_unmount(cfg: Config) -> None:
-    """Best-effort teardown when something goes sideways mid-build."""
-    chroot_umount(cfg)
-    for sub in ["boot", ""]:
-        target = cfg.mount / sub if sub else cfg.mount
-        if os.path.ismount(target):
-            run(["umount", "-l", str(target)], check=False)
-    loop = loop_for(cfg.img_path)
-    if loop:
-        losetup_detach(loop)
+    @property
+    def total_image_bytes(self) -> int:
+        return (
+            parse_size_to_bytes(self.root_size)
+            + parse_size_to_bytes(self.local_size)
+            + parse_size_to_bytes(self.esp_size)
+            + parse_size_to_bytes(self.swap_size)
+        )

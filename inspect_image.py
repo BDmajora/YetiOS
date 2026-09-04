@@ -10,8 +10,8 @@ This loop-mounts build/yetios.img read-only and reports:
   1. The GPT partition table (looking for the ESP type GUID).
   2. Whether parted's `esp` flag stuck.
   3. The filesystem on each partition.
-  4. The contents of \\EFI\\BOOT\\ and \\EFI\\libreldr\\ on the ESP.
-  5. Whether the kernel + initramfs are actually present on the ESP.
+  4. The contents of \\EFI\\BOOT\\ and \\EFI\\freebsd\\ on the ESP.
+  5. Whether the FreeBSD kernel and loader config are present on the ESP.
 
 It does not modify anything. It cleans up loop devices and mounts on exit.
 """
@@ -214,11 +214,13 @@ def diagnose_contents(esp_dev: str) -> None:
 
     print("\n--- critical paths ---")
     checks = [
-        ("EFI/BOOT/BOOTX64.EFI",       "UEFI fallback path (REQUIRED for blank-NVRAM boot)"),
-        ("EFI/libreldr/libreldr.efi",  "canonical libreldr path"),
-        ("EFI/libreldr/libreldr.conf", "libreldr config"),
-        ("EFI/yetios/vmlinuz.efi",     "kernel"),
-        ("EFI/yetios/initramfs.img",   "initramfs"),
+        ("EFI/BOOT/BOOTX64.EFI",       "UEFI fallback path, stock FreeBSD loader before ./assemble"),
+        ("EFI/freebsd/loader.efi",     "FreeBSD loader path used by libreldr after ./assemble"),
+        ("boot/loader.efi",            "FreeBSD loader beside /boot/loader.conf"),
+        ("boot/loader.conf",           "FreeBSD loader config"),
+        ("boot/kernel/kernel",         "FreeBSD kernel"),
+        ("EFI/libreldr/libreldr.efi",  "after ./assemble: canonical libreldr path"),
+        ("EFI/libreldr/libreldr.conf", "after ./assemble: libreldr config"),
     ]
     missing = []
     for rel_path, what in checks:
@@ -256,11 +258,23 @@ def diagnose_contents(esp_dev: str) -> None:
         print("      path that EVERY UEFI firmware checks when no NVRAM entry")
         print("      points to a bootloader. Without it, a freshly-defined VM")
         print("      with empty NVRAM will drop straight to the firmware menu.")
-        print("      Fix: ensure Stage 7 copies libreldr.efi to EFI/BOOT/BOOTX64.EFI.")
+        print("      Fix: ensure stage 04_bootstrap_esp copied FreeBSD loader.efi there.")
+        return
+
+    required = {
+        "EFI/freebsd/loader.efi",
+        "boot/loader.efi",
+        "boot/loader.conf",
+        "boot/kernel/kernel",
+    }
+    missing_required = sorted(required.intersection(missing))
+    if missing_required:
+        print(f"FAIL: {len(missing_required)} first-boot file(s) missing.")
+        for rel_path in missing_required:
+            print(f"      {rel_path}")
     elif missing:
-        print(f"Note: {len(missing)} non-critical file(s) missing. Boot may still")
-        print("      work via the fallback path, but the named entry and kernel")
-        print("      hand-off will fail.")
+        print(f"Note: {len(missing)} post-assemble file(s) missing. That is OK")
+        print("      before running ./assemble inside the FreeBSD VM.")
     else:
         print("OK: all critical files present on ESP.")
 
@@ -290,7 +304,8 @@ def main() -> int:
     print("  - Partition type GUID isn't ESP (firmware ignores the partition)")
     print("  - FAT32 filesystem isn't there (firmware can't read it)")
     print("  - BOOTX64.EFI never landed (firmware finds nothing to load)")
-    print("  - Kernel/initramfs never landed (libreldr loads but boot fails)")
+    print("  - FreeBSD loader/kernel never landed (stock first boot fails)")
+    print("  - libreldr files are absent because ./assemble has not run yet")
     return 0
 
 

@@ -1,0 +1,63 @@
+# YetiOS FreeBSD in-VM assemble package set
+#
+# These packages are for /assemble inside the FreeBSD VM, not the Artix/Linux
+# host pipeline. They are installed only when you boot the image and run:
+#
+#   ./assemble
+#
+# /assemble runs with the real FreeBSD kernel/userland and installs into the
+# persistent /usr/local UFS partition.
+#
+# Keep this list boring and explicit. Every package here still needs license
+# review before it becomes part of a commercial/default YetiOS image.
+
+# ---- Package/build tooling ----
+pkgconf
+gmake
+git
+autoconf
+automake
+bison
+flex
+perl5
+python311
+llvm19
+binutils
+gnu-efi
+
+# ---- FrostedWeb build/runtime ----
+meson
+ninja
+wayland
+wayland-protocols
+libxkbcommon
+xwayland
+
+# ---- Graphics/input stack ----
+drm-kmod
+libdrm
+mesa-dri
+mesa-libs
+libglvnd
+vulkan-loader
+vulkan-headers
+evdev-proto
+libinput
+libudev-devd
+seatd
+cairo
+
+# ---- Moonshine/Wine native Wayland path ----
+freetype2
+fontconfig
+gnutls
+gettext-runtime
+glib20
+libxml2
+libxslt
+sdl20
+
+# ---- Audio/runtime candidates ----
+pipewire
+wireplumber
+alsa-lib

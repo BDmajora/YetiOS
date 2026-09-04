@@ -1,102 +1,24 @@
-# YetiOS package list — Artix Linux (pacman) names, OpenRC flavour.
+# YetiOS FreeBSD base package list
 #
-# One package per line. Blank lines and `#` comments are ignored.
-# Installed in stage 06 with:  pacman -S --needed - < packages.txt
+# Alpha base policy:
+# - install no third-party packages
+# - ship only the official FreeBSD release sets plus MIT-licensed YetiOS metadata
+# - add packages here only after their licenses are reviewed
 #
-# Repos assumed enabled (see stage 05): Artix [system] [world] [galaxy]
-# plus Arch [extra] [multilib] via artix-archlinux-support. Most names below
-# are identical to Arch's, since Artix repackages Arch minus systemd.
-#
-# OpenRC note: Artix splits init scripts into per-init packages (e.g.
-# `dbus-openrc`, `seatd-openrc`). systemd is never installed — `elogind`
-# provides logind/seat functionality, and `*-openrc` ship the rc services.
-
-# ---- Kernel & firmware ----
-linux                       # Artix/Arch stock kernel (vmlinuz-linux)
-linux-firmware
-mkinitcpio                  # initramfs generator (pacman hook builds initramfs-linux.img)
-
-# ---- Init / userland base ----
-openrc                      # also pulled by the bootstrap; provides /etc/init.d/agetty
-                            # (the getty service — no separate agetty package on Artix)
-elogind                     # libelogind + pam_elogind.so (polkit/session libs). The
-                            # elogind-openrc SERVICE is intentionally omitted: it
-                            # conflicts with seatd-openrc (both provide the init-logind
-                            # virtual that 'base' requires). YetiOS uses seatd as the
-                            # seat/init-logind provider (see seatd-openrc below), so the
-                            # elogind daemon just isn't run as a service.
-bash
-sudo
-
-# ---- Firmware boot ----
-# efibootmgr registers \EFI\libreldr\libreldr.efi in UEFI NVRAM (first-boot service).
-efibootmgr
-
-# ---- Networking ----
-# dhcpcd auto-configures wired interfaces (virtio NIC shows up as enp*/eth*).
-dhcpcd
-dhcpcd-openrc
-
-# ---- Graphics / Wayland stack ----
-mesa                        # OpenGL + Vulkan drivers
-vulkan-icd-loader           # libvulkan.so dispatch
-vulkan-mesa-layers
-libglvnd                    # EGL/OpenGL dispatch
-wayland                     # libwayland-server/-client + wayland-scanner: glacier's
-                            # own Wayland compatibility frontend (Transport B) — hosts
-                            # native GTK/Qt/Electron apps. NOT wlroots, NOT a compositor.
-wayland-protocols           # xdg-shell + xdg-decoration XML (scanned at build time)
-xorg-xwayland               # Xwayland: legacy X11 apps (e.g. xterm) bridged onto the
-                            # Wayland frontend. Optional per image; modern toolkits are
-                            # Wayland-native, so this is for the X11 tail only.
-pixman                      # 2D pixel library (cairo dependency / CPU fallback path)
-libdrm                      # CrystallineLattice DRM/KMS
-libinput
-libxkbcommon
-seatd                       # DRM/input access (libseat) for CrystallineLattice
-seatd-openrc                # /etc/init.d/seatd + provides the init-logind virtual
-                            # (replacing elogind-openrc). REQUIRED — without seatd
-                            # running, glacier's libseat fails with ENOSYS (black
-                            # screen). postbuild's 'rc-update add seatd boot' enables it.
-
-# ---- Login manager (snowfall) runtime deps ----
-cairo
-pam
-
-# ---- Audio: PipeWire stack ----
-pipewire                    # winepipewire.drv backend + runtime daemon
-pipewire-pulse              # PulseAudio shim (Flatpak apps, cubeb)
-pipewire-alsa               # ALSA → PipeWire routing
-wireplumber                 # session/policy manager
-alsa-utils                  # amixer/alsactl for the boot unmute service
-rtkit                       # realtime scheduling for the audio graph (D-Bus activated)
-
-# ---- System services ----
-dbus
-dbus-openrc
-polkit                      # authorization (uses elogind, not systemd)
-
-# ---- Moonshine (Wine fork) runtime deps ----
-freetype2
-fontconfig
-gnutls
-ncurses
-libunwind
-glib2
-libxml2
-alsa-lib
-
-# ---- Build toolchain (in-chroot compilation of Moonshine + snow suite) ----
-base-devel                  # gcc, make, autoconf, automake, bison, flex, pkgconf, etc.
-meson                       # CrystallineLattice build system (pulls ninja)
-git                         # source clones inside chroot
-linux-headers               # DRM headers for snowcone
-
-# ---- Terminal ----
-foot                        # default terminal — glacier spawns it on Ctrl+Alt+T as a
-                            # native Wayland client (override with $GLACIER_TERMINAL).
-ttf-dejavu                  # monospace font so foot has something to render
-
-# ---- Flatpak (sandboxed Linux GUI apps; Flathub remote added in stage 06) ----
-flatpak
-xdg-desktop-portal
+# Future FreeBSD package candidates, deliberately disabled for the base alpha:
+# pkgconf
+# meson
+# ninja
+# git
+# wayland
+# wayland-protocols
+# libdrm
+# mesa-dri
+# mesa-libs
+# libinput
+# libxkbcommon
+# seatd
+# libudev-devd
+# cairo
+# xwayland
+# drm-kmod

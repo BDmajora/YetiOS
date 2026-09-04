@@ -1,196 +1,216 @@
 # YetiOS
 
-A minimal Linux distribution built on an Artix Linux (OpenRC) base, a custom user session, and a fully automated build pipeline.
+YetiOS is moving to a FreeBSD base with MIT-licensed YetiOS-owned build code.
+The Artix/Linux host now prepares only a bootable FreeBSD base image, applies
+the YetiOS identity, stages YetiOS source trees, and installs an in-VM
+`assemble` script. `libreldr`, SnowCone, FrostedWeb, Moonshine, and SnowFall
+are built from inside FreeBSD, not from the Linux host.
 
-## Vision
+## Base Policy
 
-YetiOS is a lightweight, from-scratch Linux distribution that boots into a clean, minimal environment. Built on Artix Linux (Arch-based, OpenRC, systemd-free) with pacman binary packages, it assembles a working system in under an hour on modern hardware — no compilation marathon required.
-
-Future versions will include:
-- **Wayland desktop session** — labwc compositor with a minimal launcher
-- **Custom boot splash** — fbdev/DRM initramfs program
-- **UEFI + SecureBoot support** — GPT partition scheme and signed kernel images
-- **Graphical installer** — automated image-to-disk deployment tool
+- FreeBSD release sets provide the permissive BSD-licensed core system.
+- YetiOS-owned build code and project metadata are MIT licensed.
+- The Artix/Linux host pipeline installs no packages from ports/pkg.
+- The first boot uses FreeBSD's stock loader so the VM can run `./assemble`.
+- YetiOS-owned components are compiled by `/assemble` inside the FreeBSD VM.
+- Moonshine/Wine remains a separate LGPL compliance boundary.
 
 ## Project Structure
 
-```
-run.py                         # Build orchestrator entry point
-packages.txt                   # Runtime package list (pacman names, one per line)
-postbuild.sh                   # Post-install user/hostname/locale/service configuration
-yetios-vm.xml                  # libvirt VM definition template
-test.py                        # Register and start the image in virt-manager
+```text
+run.py                         # FreeBSD base-image preparer
+packages.txt                   # Reviewed FreeBSD package candidates; empty for alpha
+desktop-packages.txt           # FreeBSD package candidates used by /assemble
 src/
-  core.py                      # Shared toolkit: Config, BuildState, chroot/loop helpers
-  rootfs.py                    # pacman.conf, mirror lists, fstab, OpenRC service templates
-  stage_01_host_check.py       # Verify tools, platform, disk space
-  stage_02_image.py            # Create sparse image, partition, format, mount
-  stage_03_fetch.py            # Download the Artix bootstrap script
-  stage_04_extract.py          # Bootstrap a minimal Artix base into the image
-  stage_05_pacman_setup.py     # pacman.conf, mirror lists, keyrings, sync
-  stage_06_install_packages.py # pacman -S packages.txt + post-install configuration
-  stage_07_moonshine.py        # Build/install Moonshine (Wine fork) in chroot
-  stage_08_bootloader.py       # libreldr UEFI install + kernel/initramfs to ESP
-  stage_09_snowfall.py         # Build/install snowfall login manager
-  stage_10_crystallinelattice.py # Build/install CrystallineLattice compositor
-  stage_11_splash.py           # Build/install snowcone boot splash
-  stage_12_unmount.py          # Clean unmount, detach loop device
-build/                         # Created during build
-  yetios.img                   # Final bootable disk image
-  bootstrap-cache/             # Cached artix-bootstrap.sh + downloaded base packages
-  .yeti-state/                 # Stage completion markers for resumable builds
+  core.py                      # Shared config, logging, stage state
+  rootfs.py                    # FreeBSD + libreldr configuration templates
+  stage_01_host_check.py       # Local host sanity checks
+  stage_02_fetch_release.py    # Fetch FreeBSD MANIFEST + base/kernel sets
+  stage_03_stage_root.py       # Verify/extract sets, apply identity, stage /assemble
+  stage_04_bootstrap_esp.py    # Install stock FreeBSD loader.efi for first boot
+  stage_05_assemble_image.py   # Create/populate build/yetios.img with Linux tools
+  stage_06_libvirt_access.py   # Grant system libvirt access to the image path
+  stage_07_manifest.py         # Write source, login, and boot notes
+build/
+  yetios.img                   # Assembled YetiOS FreeBSD image
+  rootfs/                      # Staged FreeBSD root filesystem
+  esp/                         # Staged EFI system partition
+  freebsd-cache/               # Cached FreeBSD release files
+  FREEBSD_SOURCE.sha256        # Verified source checksum record
+  YETIOS_FREEBSD_IMAGE.txt     # Image manifest
+  .yeti-state/                 # Stage completion markers
 ```
 
-## Quick Start
+## Usage
 
-### Prerequisites
-
-- Linux host (x86_64)
-- Root access (loop devices and chroot require it)
-- ~25 GB free disk space
-- Standard tools: `parted`, `qemu-img`, `wget`, `curl`, `tar`, `xz`, `zstd`, `gawk`
-
-On Debian/Ubuntu/Mint:
-```bash
-sudo apt install parted util-linux dosfstools qemu-utils wget curl \
-                 tar xz-utils zstd gawk git build-essential gnu-efi
-```
-
-### Building YetiOS
+The image pipeline is still run through `run.py`:
 
 ```bash
-git clone https://github.com/yourusername/yetios.git
-cd yetios
 sudo ./run.py
 ```
 
-The build is fully resumable. If interrupted, re-run and completed stages are skipped automatically. To restart from scratch:
+Then boot the VM, log in as `yetios`, and run:
+
+```sh
+./assemble
+```
+
+That script runs inside FreeBSD. It formats and mounts the persistent
+`/usr/local` UFS partition, bootstraps `pkg`, installs the package candidates
+from `desktop-packages.txt`, builds `libreldr`, builds SnowCone, builds
+FrostedWeb, builds Moonshine with Wine's native Wayland driver, and skips
+SnowFall until its FreeBSD backend lands.
+
+The default alpha login is:
+
+```text
+user: yetios
+password: yetios
+root password: yetios
+```
+
+FreeBSD package bootstrapping is automated through the YetiOS alpha sudo helper.
+From the normal `yetios` login:
+
+```sh
+sudo pkg update
+```
+
+For this Linux-tool alpha, `/usr/local` is a persistent FreeBSD UFS partition
+prepared by first boot or by `./assemble`. `/var` and `/home` are RAM-backed;
+the package database and cache are recreated as symlinks into persistent
+`/usr/local/var`.
+
+The pipeline is resumable. Re-run the command to continue after a failure, or
+after source/config changes; completed stages are only skipped when their
+recorded inputs still match. Clear all stage markers with:
 
 ```bash
 sudo ./run.py --restart
 ```
 
-To re-run a single stage:
+Run a single stage with:
 
 ```bash
-sudo ./run.py --only 06_install_packages
+sudo ./run.py --only 04_bootstrap_esp
 ```
 
-**Build stages:**
+If you use `test.py`/virt-manager, stage 6 grants the system QEMU service user
+the narrow ACL permissions it needs to traverse the project path and open
+`build/yetios.img`.
 
-| Stage | Name               | Time     | Description                                 |
-|-------|--------------------|----------|---------------------------------------------|
-| 1     | host_check         | seconds  | Verify tools, disk space, and permissions   |
-| 2     | image_create       | seconds  | Create sparse 20 GB raw image               |
-| 2     | image_mount        | seconds  | Partition, format ext2/ext4, loop-mount     |
-| 3     | fetch              | seconds  | Download the Artix bootstrap script         |
-| 4     | extract            | ~5 min   | Bootstrap a minimal Artix base into the image |
-| 5     | pacman_setup       | ~3 min   | Configure pacman repos + keyrings, sync     |
-| 6     | install_packages   | ~15 min  | pacman -S the userland + post-install config |
-| 7     | bootloader         | seconds  | Install extlinux + MBR boot stub            |
-| 8     | unmount            | seconds  | Detach loop device, print boot command      |
+## In-VM Assemble Path
 
-### Booting YetiOS
+The old Moonshine build pattern has been brought forward without pretending
+Artix can execute FreeBSD binaries. `run.py` stages the local source trees under:
 
-Boot directly with QEMU (printed at the end of a successful build):
-
-```bash
-qemu-system-x86_64 -enable-kvm -m 4G \
-    -drive file=build/yetios.img,format=raw \
-    -vga virtio -display gtk,gl=on
+```text
+/usr/src/yetios/sources
 ```
 
-Or register it in virt-manager:
+The FreeBSD-side assembler copies those sources to `/usr/local/src/yetios-build`
+and builds there. Moonshine uses the native Wayland path:
 
-```bash
-python3 test.py
-virsh -c qemu:///system start yetios
+```sh
+./configure --enable-win64 --with-wayland --without-x
 ```
 
-**Default credentials:** User `yeti`, password `yeti`. The system autologins on tty1.
+SnowFall is intentionally guarded right now. The assembler restores the build
+slot, but skips SnowFall until its Linux/OpenRC/udev/VT pieces are ported to
+FreeBSD rc.d and FreeBSD device/input assumptions.
+
+The desktop package list is a development/build candidate list, not a
+commercial-ready license approval. The Artix/Linux host pipeline still installs
+no ports/pkg packages.
+
+## Loading Screen
+
+Before `./assemble`, the image boots with stock FreeBSD loader. After
+`./assemble`, the VM installs the YetiOS boot path:
+
+```text
+/boot/yetios-black.bmp         black loader-stage handoff cover
+/boot/images/yetios-black.png  black vt boot_mute handoff cover
+/boot/images/freebsd-logo-rev.png replaced with a black YetiOS-owned image
+/boot/yetios-snowcone.bmp      generated SnowCone theme preview
+/boot/images/yetios-snowcone.png generated SnowCone theme preview
+/etc/rc.d/yetios_snowcone      starts the live FreeBSD framebuffer renderer
+/etc/rc.d/yetios_snowcone_handoff stops SnowCone before LOGIN
+/usr/libexec/yetios/snowcone   SnowCone built inside FreeBSD
+```
+
+`loader.conf` disables the FreeBSD boot menu/countdown and enables `boot_mute`
+and `boot_mutemsgs` with a black handoff image selected as the FreeBSD splash.
+libreldr also switches the UEFI text console to black-on-black immediately
+before chainloading FreeBSD's `loader.efi`, and passes `-m` through the
+chainload entry so `loader.efi` starts with `boot_mute` already active.
+The ESP copy of `loader.efi` also has its early status format strings blanked
+so `Consoles`, `loader.env`, and `currdev` messages do not flash on screen.
+`kern.consmute=1` keeps kernel
+messages off the primary console before SnowCone starts. YetiOS silences rc
+console output before the early rc pass so startup scripts cannot flash text
+over the black handoff or SnowCone.
+`yetios_snowcone_handoff` stops SnowCone and clears the terminal before the
+normal text login or a future login manager, then unmutes the console.
+SnowCone uses a built-in readable bitmap font in the FreeBSD renderer so it
+does not depend on vt exposing a console font while graphics mode is active.
+The broken text fallback is not installed.
+
+The Linux-tool image path creates the root partition with a conservative
+old-style ext2 profile: no optional feature flags, no default xattr/ACL mount
+options, and a host-side `e2fsck` pass before the image is accepted. At runtime
+the ext2 root stays read-only after first-boot setup. `/usr/local` is FreeBSD
+UFS; `/tmp`, `/var`, and `/home` are RAM-backed.
 
 ## Command-Line Options
 
-```
---build-dir DIR     Output directory for image and cache (default: ./build)
---size N            Image size in GB (default: 20)
---mount PATH        Mountpoint during build (default: /mnt/yetios)
---yeti-user NAME    Default user inside YetiOS (default: yeti)
---hostname NAME     System hostname (default: yetios)
---tz TZ             Timezone (default: UTC)
---jobs N            Parallel build jobs (default: nproc)
---artix-mirror URL  Artix repo mirror (default: https://mirror1.artixlinux.org/repos)
---arch-mirror URL   Arch repo mirror  (default: https://geo.mirror.pkgbuild.com)
---init NAME         Artix init system: openrc|runit|s6|dinit (default: openrc)
---restart           Wipe stage markers and start over
---only STAGE        Run a single stage and exit
-```
-
-## Packages
-
-The runtime package set lives in [`packages.txt`](packages.txt) at the repo root —
-one pacman package per line, `#` for comments. Add or remove packages there;
-stage 6 installs them with `pacman -S --needed`. Names are Artix/Arch package
-names (e.g. `pipewire`, `mesa`, `vulkan-icd-loader`).
-
-## Updating the System
-
-From inside YetiOS:
-
-```bash
-sudo pacman -Syu          # refresh repos and upgrade everything
-sudo pacman -S <package>  # install a package
-sudo pacman -Rns <package> # remove a package and its unused deps
+```text
+--build-dir DIR       Output directory for image work and FreeBSD cache
+--release NAME        FreeBSD release to install into the image
+--arch NAME           FreeBSD release architecture
+--mirror URL          FreeBSD release mirror base URL
+--hostname NAME       Target hostname
+--yeti-user NAME      Default YetiOS login account
+--yeti-password TEXT  Default alpha password
+--tz TZ               Target timezone
+--root-size SIZE      Root ext2 partition size for the Linux-tool alpha path
+--local-size SIZE     Persistent FreeBSD UFS /usr/local partition size
+--esp-size SIZE       EFI system partition size
+--swap-size SIZE      Swap partition size
+--jobs N              Default parallel jobs recorded for in-VM assemble
+--libreldr-dir DIR    Path to the libreldr source tree
+--snowcone-dir DIR    Path to the SnowCone source tree
+--moonshine-dir DIR   Path to the Moonshine source tree
+--snowfall-dir DIR    Path to the SnowFall source tree
+--frostedweb-dir DIR  Path to the FrostedWeb source tree
+--desktop-packages-file FILE
+                     FreeBSD pkg list copied for /assemble
+--restart             Wipe stage markers and run the pipeline again
+--only STAGE          Run one stage and exit
 ```
 
-## Current Limitations (v0)
+## Boot Path
 
-- **BIOS + MBR only.** No UEFI or GPT support. Planned for v1.
-- **No graphical session.** Boots to a text login. Wayland/labwc session planned for v1.
-- **No boot splash.** Standard kernel quiet mode. Custom splash planned for v1.
-- **Minimal package set.** Only core packages are installed. Extend via `emerge` inside the VM.
+The image uses UEFI:
 
-## Troubleshooting
-
-### Login incorrect at boot
-
-Boot into single-user mode by pressing `Tab` at the extlinux prompt and appending `single` to the kernel line, then set a password with `passwd yeti`.
-
-### Image doesn't boot in QEMU / virt-manager
-
-- Ensure the VM is configured for **BIOS** (not UEFI) — the image uses extlinux + MBR.
-- Verify stage 7 and 8 completed in the build output.
-- Inspect the image directly:
-  ```bash
-  sudo losetup -P /dev/loop0 build/yetios.img
-  sudo mount /dev/loop0p2 /mnt && ls /mnt
-  ```
-
-### virt-manager: "Network not found: default"
-
-```bash
-virsh net-define /usr/share/libvirt/networks/default.xml
-virsh net-start default
-virsh net-autostart default
+```text
+EFI/BOOT/BOOTX64.EFI          stock FreeBSD loader before ./assemble
+EFI/BOOT/BOOTX64.EFI          libreldr after ./assemble
+EFI/libreldr/libreldr.efi     copy of libreldr after ./assemble
+EFI/libreldr/libreldr.conf    YetiOS boot menu config after ./assemble
+EFI/freebsd/loader.efi        FreeBSD loader chainloaded by libreldr after ./assemble
+boot/kernel/kernel            FreeBSD kernel staged on ESP for loader.efi
 ```
 
-### Permission denied on image file
-
-The image is owned by root after a `sudo` build. Fix with:
-
-```bash
-sudo chown $USER:$USER build/yetios.img
-chmod 644 build/yetios.img
-```
+The alpha root partition is ext2 so the Artix/Linux host tools can populate it.
+Its fstab fsck pass is `0` because FreeBSD base does not ship `fsck_ext2fs`.
+The root is mounted read-only during normal runtime. First boot temporarily
+remounts it writable only long enough to create the `yetios` account, set the
+alpha passwords, install the restricted `/usr/bin/sudo` helper, sync, and
+return the root to read-only before login.
 
 ## License
 
-YetiOS is built from open-source components and provided as-is. See individual package licenses (Linux kernel, Gentoo, GNU utilities, etc.) for licensing details.
-
-## References
-
-- [Artix Linux](https://artixlinux.org/)
-- [Artix Wiki](https://wiki.artixlinux.org/)
-- [artix-bootstrap](https://gitea.artixlinux.org/artix/artix-bootstrap)
-- [Arch Wiki: pacman](https://wiki.archlinux.org/title/Pacman)
-- [libvirt / virt-manager](https://virt-manager.org/)
+YetiOS build code is MIT licensed. The base system is FreeBSD, whose base is
+BSD/permissive licensed. Third-party packages must be reviewed before they are
+added to the base image.
